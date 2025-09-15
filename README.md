@@ -76,3 +76,29 @@ We welcome contributions! Please open issues or submit pull requests to improve 
 ## 📬 Contact
 
 For questions, collaborations, or feedback, reach out via [GitHub Issues](https://github.com/your-repo/issues) or email the maintainers.
+
+## 📅 Project Timeline
+
+### 🟢 FloatChat – Day 1: Data Ingestion & Setup
+
+**🎯 Goal**  
+Prepare real ARGO float data in a **structured, analysis-ready format** to use for chat-driven exploration and visualization in later days.
+
+**✅ Steps Completed**
+- Pulled subset of ARGO float profiles from **Ifremer ERDDAP** (`ArgoFloats`, `ArgoFloats-index`)
+- Extracted key fields: `time`, `latitude`, `longitude`, `platform_number`, `pres`, `temp`, `psal`
+- Saved data as **Parquet** in `data_cache/` for fast local access
+- Added optional ingestion of **NetCDF** files into Parquet format
+
+**🛠️ Scripts Used**
+- `fetch_argo_erddap.py` → Downloads profile data
+- `fetch_index.py` → Downloads lightweight metadata index
+- `ingest_local_netcdf.py` → Converts local NetCDF → Parquet
+- `check_cache.py` → Sanity check for saved datasets
+
+**🔜 Next Steps (Day 2 Preview)**
+- Build basic visualizations using cached data:
+  - 🌍 Map of float locations
+  - 📈 Depth vs temperature/salinity plots
+
+---

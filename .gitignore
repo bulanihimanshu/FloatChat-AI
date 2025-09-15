@@ -1,0 +1,9 @@
+# FloatChat project exclusions
+
+# Data and cache folders
+scripts/datasets/
+data/
+data_cache/
+
+# Python virtual environment
+venv/
