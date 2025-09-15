@@ -1,0 +1,7 @@
+pandas
+pyarrow
+requests
+erddapy
+xarray
+netCDF4
+python-dotenv
