@@ -67,6 +67,7 @@ This document explains the **agents (functional modules)** in the FloatChat proj
 - Coordinate data → filter → viz → chat flow.  
 - Handle caching, session state, and layout.  
 - Provide **Final Judge-Ready Demo** via `dashboard.py`.  
+    - Demo should include: seamless navigation, example queries, interactive maps, live data overlays, and clear instructions for judges.
 
 ---
 
@@ -84,6 +85,11 @@ This document explains the **agents (functional modules)** in the FloatChat proj
 
 ## 🔹 Workflow
 
+![FloatChat Workflow Diagram](assets/floatchat_workflow.png)
+
+<details>
+<summary>Mermaid source (for editing):</summary>
+
 ```mermaid
 flowchart TD
     A[User Query] --> B[Chat Agent]
@@ -91,11 +97,7 @@ flowchart TD
     C --> D[Visualization Agent]
     D --> E[Dashboard Output]
 
-    B -->|If no ARGO data match| F[Hybrid Fallback]
-    F --> G[Web Search Agent]
-    G --> H[Local LLM Agent]
-    H --> E
-
+```
 🔹 Notes
 
     Agents are modular and can be extended with other oceanographic datasets (gliders, moorings, satellites).
