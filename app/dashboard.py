@@ -1,13 +1,16 @@
 # dashboard.py  —  Final Judge-Ready Demo
+import calendar
 import os
 import io
 from pathlib import Path
-from typing import Dict
+import re
+from typing import Any, Dict, List, Optional, Tuple
 import json
 import pandas as pd
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
+from functools import lru_cache
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -32,34 +35,70 @@ import requests
 # Local LLM + Web Search
 from duckduckgo_search import DDGS
 
-def web_search(query: str, num_results: int = 5) -> str:
+def web_search(query: str, num_results: int = 3) -> str:
     """Fetch snippets from DuckDuckGo search (no API key needed)."""
     try:
         with DDGS() as ddgs:
             results = ddgs.text(query, max_results=num_results)
-            snippets = [r["title"] + ": " + r["body"] for r in results]
-        return "\n".join(snippets)
+            snippets = [
+                f"{r['title']}: {r['body']}".strip()
+                for r in results
+                if r.get("title") and r.get("body")
+            ]
+        return "\n".join(snippets[:num_results]) if snippets else ""
     except Exception as e:
         return f"(Web search unavailable: {e})"
 
+@lru_cache(maxsize=1)
+def _ollama_available() -> bool:
+    try:
+        requests.get("http://localhost:11434/api/tags", timeout=2)
+        return True
+    except Exception:
+        return False
+
 def ollama_answer(query: str, context: str = "", model: str = "llama3") -> str:
     """Ask a local Ollama model (free) with optional web context."""
+    if not _ollama_available():
+        return "⚠️ Local LLM unavailable: service not reachable on localhost:11434."
+    
+    
+    
+    
+    
+    
     try:
-        r = requests.post("http://localhost:11434/api/chat", json={
-            "model": model,
-            "messages": [
-                {"role": "system", "content": "You are an expert assistant on oceans and ARGO data."},
-                {"role": "user", "content": f"Question: {query}\n\nContext:\n{context}"}
-            ]
-        }, timeout=120)
-        return r.json()["message"]["content"]
+        r = requests.post(
+            "http://localhost:11434/api/chat",
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "You are an expert assistant on oceans and ARGO data."},
+                    {"role": "user", "content": f"Question: {query}\n\nContext:\n{context}"},
+                ],
+            },
+            timeout=20,
+        )
+        r.raise_for_status()
+        data = r.json()
+        message = data.get("message", {}).get("content")
+        return message or "(Received empty response from Ollama.)"
     except Exception as e:
         return f"⚠️ Local LLM unavailable: {e}"
 
 def hybrid_fallback_answer(query: str) -> str:
     """Fallback: web search + local LLM."""
     context = web_search(query)
-    return ollama_answer(query, context)
+    
+    if _ollama_available():
+        answer = ollama_answer(query, context)
+        if answer:
+            return answer
+
+    if context:
+        return "🔎 Web snippets:\n" + context
+
+    return "⚠️ Unable to fetch an AI answer right now."
 
 import json
 
@@ -86,7 +125,8 @@ st.markdown(
     <style>
       /* Reduce any flicker/ghost effect & tighten top spacing */
       .block-container { padding-top: 1rem; }
-      .stPlotlyChart { opacity: 1 !important; }
+      .stPlotlyChart, .stPlotlyChart > div { opacity: 1 !important; transition: none !important; animation: none !important; }
+      div[data-testid="stVerticalBlock"] { transition: none !important; }
       .st-emotion-cache-1629p8f { padding-top: 0 !important; } /* Streamlit minor layout fix */
     </style>
     """,
@@ -108,6 +148,352 @@ PLOTLY_TEMPLATES = {
 
 MAP_STYLES_LIGHT = ["open-street-map", "carto-positron", "stamen-terrain"]
 MAP_STYLES_DARK = ["carto-darkmatter", "stamen-toner"]
+
+# -----------------------------
+# Query parsing + chat helpers
+# -----------------------------
+VARIABLE_ALIASES: Dict[str, str] = {
+    "temp": "temp",
+    "temperature": "temp",
+    "temperature profile": "temp",
+    "heat": "temp",
+    "salinity": "psal",
+    "psal": "psal",
+    "salt": "psal",
+    "oxygen": "doxy",
+    "dissolved oxygen": "doxy",
+    "chlorophyll": "chlorophyll",
+    "nitrate": "nitrate",
+}
+
+REGION_BOUNDS: Dict[str, Dict[str, Tuple[float, float]]] = {
+    "indian ocean": {"lat_range": (-40, 30), "lon_range": (20, 120)},
+    "arabian sea": {"lat_range": (5, 30), "lon_range": (45, 75)},
+    "bay of bengal": {"lat_range": (5, 25), "lon_range": (80, 100)},
+    "equator": {"lat_range": (-5, 5)},
+    "southern ocean": {"lat_range": (-70, -40)},
+}
+
+COORD_TOKEN_RE = r"-?\d+(?:\.\d+)?(?:\s*(?:degrees?|deg)?\s*(?:north|south|east|west|[nsew]))?"
+MONTH_PATTERN = re.compile(
+    r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(20\d{2}|19\d{2})",
+    re.IGNORECASE,
+)
+DIRECTION_KEYWORDS = {"north": "n", "south": "s", "east": "e", "west": "w"}
+
+MONTH_NAME_TO_NUM: Dict[str, int] = {}
+for idx in range(1, 13):
+    MONTH_NAME_TO_NUM[calendar.month_name[idx].lower()] = idx
+    MONTH_NAME_TO_NUM[calendar.month_abbr[idx].lower()] = idx
+
+
+def _normalize_coord(token: str, axis: str) -> Optional[float]:
+    """Convert tokens like '10N' or '45 degrees west' into signed floats."""
+
+    if not token:
+        return None
+
+    token_clean = token.strip()
+    if not token_clean:
+        return None
+
+    direction: Optional[str] = None
+    for word, short in DIRECTION_KEYWORDS.items():
+        if re.search(word, token_clean, flags=re.IGNORECASE):
+            direction = short
+            token_clean = re.sub(word, "", token_clean, flags=re.IGNORECASE)
+            break
+
+    if token_clean and token_clean[-1].lower() in "nsew":
+        direction = token_clean[-1].lower()
+        token_clean = token_clean[:-1]
+
+    token_clean = re.sub(r"[°º]", "", token_clean)
+    token_clean = re.sub(r"\bdeg(?:rees?)?\b", "", token_clean, flags=re.IGNORECASE)
+    token_clean = token_clean.strip()
+    match = re.search(r"-?\d+(?:\.\d+)?", token_clean)
+    if not match:
+        return None
+
+    value = float(match.group(0))
+    if direction:
+        if axis == "lat" and direction in ("s",):
+            value = -value
+        if axis == "lon" and direction in ("w",):
+            value = -value
+    return value
+
+
+def _extract_axis_range(text: str, axis: str) -> Optional[Tuple[float, float]]:
+    """Parse latitude/longitude ranges from free-form text."""
+
+    axis_keywords = ["lat", "latitude"] if axis == "lat" else ["lon", "longitude"]
+    for keyword in axis_keywords:
+        pattern = rf"{keyword}[^\d-]*({COORD_TOKEN_RE})\s*(?:and|to|-)\s*({COORD_TOKEN_RE})"
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            v1 = _normalize_coord(match.group(1), axis)
+            v2 = _normalize_coord(match.group(2), axis)
+            if v1 is not None and v2 is not None:
+                low, high = sorted((v1, v2))
+                return (low, high)
+
+    if axis == "lat":
+        above = re.search(rf"north of\s*({COORD_TOKEN_RE})", text, flags=re.IGNORECASE)
+        below = re.search(rf"south of\s*({COORD_TOKEN_RE})", text, flags=re.IGNORECASE)
+        if above:
+            value = _normalize_coord(above.group(1), axis)
+            if value is not None:
+                return (value, 90.0)
+        if below:
+            value = _normalize_coord(below.group(1), axis)
+            if value is not None:
+                return (-90.0, value)
+    else:
+        east = re.search(rf"east of\s*({COORD_TOKEN_RE})", text, flags=re.IGNORECASE)
+        west = re.search(rf"west of\s*({COORD_TOKEN_RE})", text, flags=re.IGNORECASE)
+        if east:
+            value = _normalize_coord(east.group(1), axis)
+            if value is not None:
+                return (value, 180.0)
+        if west:
+            value = _normalize_coord(west.group(1), axis)
+            if value is not None:
+                return (-180.0, value)
+
+    return None
+
+
+def _extract_near_ranges(text: str) -> Tuple[Optional[Tuple[float, float]], Optional[Tuple[float, float]]]:
+    """Detect 'near lat, lon' style queries and return a bounding box."""
+
+    pattern = rf"near\s*({COORD_TOKEN_RE})\s*,\s*({COORD_TOKEN_RE})"
+    match = re.search(pattern, text, flags=re.IGNORECASE)
+    if not match:
+        return None, None
+
+    lat_center = _normalize_coord(match.group(1), "lat")
+    lon_center = _normalize_coord(match.group(2), "lon")
+    if lat_center is None or lon_center is None:
+        return None, None
+
+    padding = 2.5
+    return (
+        (lat_center - padding, lat_center + padding),
+        (lon_center - padding, lon_center + padding),
+    )
+
+
+def _extract_date_range(text: str) -> Optional[Tuple[pd.Timestamp, pd.Timestamp]]:
+    """Parse relative or absolute date ranges."""
+
+    lower = text.lower()
+    now = pd.Timestamp.utcnow().normalize()
+
+    recent = re.search(r"last\s+(\d+)\s+(day|days|week|weeks|month|months|year|years)", lower)
+    if recent:
+        count = int(recent.group(1))
+        unit = recent.group(2)
+        if "day" in unit:
+            start = now - pd.Timedelta(days=count)
+        elif "week" in unit:
+            start = now - pd.Timedelta(weeks=count)
+        elif "month" in unit:
+            start = now - pd.DateOffset(months=count)
+        else:
+            start = now - pd.DateOffset(years=count)
+        return (start.normalize(), now)
+
+    month_matches = list(MONTH_PATTERN.finditer(lower))
+    if month_matches:
+        start_match = month_matches[0]
+        end_match = month_matches[-1]
+        start_month = MONTH_NAME_TO_NUM[start_match.group(1).lower()]
+        start_year = int(start_match.group(2))
+        start = pd.Timestamp(year=start_year, month=start_month, day=1)
+
+        end_month = MONTH_NAME_TO_NUM[end_match.group(1).lower()]
+        end_year = int(end_match.group(2))
+        end = pd.Timestamp(year=end_year, month=end_month, day=1) + pd.offsets.MonthEnd()
+        return (start, end)
+
+    years = [int(y) for y in re.findall(r"(19\d{2}|20\d{2})", lower)]
+    if years:
+        years.sort()
+        start_year = years[0]
+        end_year = years[-1]
+        start = pd.Timestamp(year=start_year, month=1, day=1)
+        end = pd.Timestamp(year=end_year, month=12, day=31)
+        return (start, end)
+
+    return None
+
+
+def llm_parse_query(query: str) -> Dict[str, Any]:
+    """Lightweight rule-based parser used when the LLM is unavailable."""
+
+    filters: Dict[str, Any] = {}
+    lower = query.lower()
+
+    for keyword, column in VARIABLE_ALIASES.items():
+        if keyword in lower:
+            filters["variable"] = column
+            break
+
+    if "profile" in lower and "variable" not in filters:
+        filters["variable"] = "temp"
+
+    near_lat, near_lon = _extract_near_ranges(lower)
+    if near_lat and "lat_range" not in filters:
+        filters["lat_range"] = near_lat
+    if near_lon and "lon_range" not in filters:
+        filters["lon_range"] = near_lon
+
+    lat_range = _extract_axis_range(lower, "lat")
+    if lat_range:
+        filters["lat_range"] = lat_range
+
+    lon_range = _extract_axis_range(lower, "lon")
+    if lon_range:
+        filters["lon_range"] = lon_range
+
+    for region, bbox in REGION_BOUNDS.items():
+        if region in lower:
+            filters["region"] = region
+            if "lat_range" not in filters and "lat_range" in bbox:
+                filters["lat_range"] = bbox["lat_range"]
+            if "lon_range" not in filters and "lon_range" in bbox:
+                filters["lon_range"] = bbox["lon_range"]
+            break
+
+    date_range = _extract_date_range(query)
+    if date_range:
+        filters["date_range"] = date_range
+
+    return filters
+
+
+def apply_query_filters(df: pd.DataFrame, filters: Dict[str, Any]) -> Tuple[pd.DataFrame, List[str]]:
+    """Apply parsed filters to the dataframe and return a summary."""
+
+    if not filters:
+        return df, []
+
+    filtered = df
+    applied: List[str] = []
+
+    if "lat_range" in filters and "latitude" in filtered.columns:
+        lat_min, lat_max = sorted(tuple(map(float, filters["lat_range"])))
+        filtered = filtered[(filtered["latitude"] >= lat_min) & (filtered["latitude"] <= lat_max)]
+        applied.append(f"latitude {lat_min:.1f}° to {lat_max:.1f}°")
+
+    if "lon_range" in filters and "longitude" in filtered.columns:
+        lon_min, lon_max = sorted(tuple(map(float, filters["lon_range"])))
+        filtered = filtered[(filtered["longitude"] >= lon_min) & (filtered["longitude"] <= lon_max)]
+        applied.append(f"longitude {lon_min:.1f}° to {lon_max:.1f}°")
+
+    if "date_range" in filters and "date" in filtered.columns:
+        start, end = filters["date_range"]
+        start = pd.to_datetime(start, errors="coerce")
+        end = pd.to_datetime(end, errors="coerce")
+        if pd.notna(start) and pd.notna(end):
+            if end < start:
+                start, end = end, start
+            filtered = filtered[(filtered["date"] >= start) & (filtered["date"] <= end)]
+            applied.append(f"date {start.date()} → {end.date()}")
+
+    return filtered, applied
+
+
+def _summarize_filters(applied_filters: List[str]) -> str:
+    if not applied_filters:
+        return "No additional filters applied."
+    return "Filters: " + "; ".join(applied_filters)
+
+
+def build_profile_figure(
+    df: pd.DataFrame, variable: str, template: str
+) -> Tuple[Optional[go.Figure], Optional[str]]:
+    """Create a depth profile figure for the requested variable."""
+
+    if not {"pres", variable}.issubset(df.columns):
+        return None, None
+
+    cols = ["pres", variable]
+    if "date" in df.columns:
+        cols.append("date")
+    if "platform_number" in df.columns:
+        cols.append("platform_number")
+
+    plot_df = df[cols].dropna(subset=["pres", variable]).copy()
+    if plot_df.empty:
+        return None, None
+
+    float_id: Optional[str] = None
+    if "platform_number" in plot_df.columns:
+        available = plot_df["platform_number"].dropna()
+        if not available.empty:
+            available_str = available.astype(str)
+            mode_val = available_str.mode()
+            float_id = mode_val.iloc[0] if not mode_val.empty else available_str.iloc[0]
+            plot_df = plot_df[plot_df["platform_number"].astype(str) == float_id]
+
+    plot_df = plot_df.sort_values("pres", kind="mergesort").head(2000)
+    color_arg = "date" if "date" in plot_df.columns else None
+
+    fig = px.scatter(
+        plot_df,
+        x=variable,
+        y="pres",
+        color=color_arg,
+        labels={"pres": "Pressure (dbar)", variable: variable.upper()},
+        template=template,
+        height=420,
+    )
+    fig.update_traces(mode="lines+markers", marker=dict(size=6))
+    fig.update_yaxes(autorange="reversed")
+
+    return fig, float_id
+
+
+def run_query_pipeline(query: str, df: pd.DataFrame, template: str) -> Dict[str, Any]:
+    """End-to-end pipeline used by the chat tab to answer queries."""
+
+    filters = llm_parse_query(query)
+    filtered_df, applied_filters = apply_query_filters(df, filters)
+    row_count = int(len(filtered_df))
+
+    result: Dict[str, Any] = {
+        "filters": filters,
+        "applied_filters": applied_filters,
+        "filtered_df": filtered_df,
+        "row_count": row_count,
+        "figure": None,
+        "float_id": None,
+        "reply": "",
+    }
+
+    variable = filters.get("variable")
+    if variable and variable in filtered_df.columns and row_count > 0:
+        figure, float_id = build_profile_figure(filtered_df, variable, template)
+        if figure:
+            result["figure"] = figure
+            result["float_id"] = float_id
+            summary = _summarize_filters(applied_filters)
+            base_text = f"Showing {variable.upper()} profile"
+            if float_id:
+                base_text += f" for float {float_id}"
+            base_text += f" ({row_count:,} records)."
+            result["reply"] = base_text + "\n" + summary
+
+    if not result["reply"]:
+        summary = _summarize_filters(applied_filters)
+        if row_count > 0:
+            result["reply"] = f"Found {row_count:,} matching rows.\n" + summary
+        elif applied_filters:
+            result["reply"] = "No rows matched the requested filters.\n" + summary
+
+    return result
 
 # -----------------------------
 # Perf helpers
@@ -569,53 +955,25 @@ with tab_chat:
         st.session_state["messages"].append({"role": "user", "content": query})
         st.chat_message("user").write(query)
 
-        filters = llm_parse_query(query)
-        df_chat = df_full.copy()
-        plotted = False
+        with st.spinner("⚙️ Running query pipeline..."):
+            result = run_query_pipeline(query, df_full, plotly_template)
 
-        if filters and "variable" in filters:
-            variable = filters.get("variable", "temp")
+        assistant_text = result.get("reply") or "I couldn't interpret that request with the available data."
+        st.session_state["messages"].append({"role": "assistant", "content": assistant_text})
+        assistant_chat = st.chat_message("assistant")
+        assistant_chat.write(assistant_text)
 
-            if filters.get("lat_range"):
-                lat_min, lat_max = filters["lat_range"]
-                df_chat = df_chat[(df_chat["latitude"] >= lat_min) & (df_chat["latitude"] <= lat_max)]
-            if filters.get("lon_range"):
-                lon_min, lon_max = filters["lon_range"]
-                df_chat = df_chat[(df_chat["longitude"] >= lon_min) & (df_chat["longitude"] <= lon_max)]
-            if filters.get("date_range") and "date" in df_chat.columns:
-                start, end = pd.to_datetime(filters["date_range"][0]), pd.to_datetime(filters["date_range"][1])
-                df_chat = df_chat[(df_chat["date"] >= start) & (df_chat["date"] <= end)]
-
-            if not df_chat.empty and variable in df_chat.columns:
-                if "platform_number" in df_chat.columns:
-                    float_id = df_chat["platform_number"].dropna().unique()[0]
-                    df_float = df_chat[df_chat["platform_number"] == float_id]
-                else:
-                    float_id = "Unknown"
-                    df_float = df_chat.head(500)
-
-                fig = px.scatter(
-                    df_float, x=variable, y="pres",
-                    color="date" if "date" in df_float.columns else None,
-                    labels={"pres": "Pressure (dbar)", variable: variable.upper()},
-                    title=f"{variable.upper()} vs Depth for Float {float_id}",
-                    template=plotly_template
-                )
-                fig.update_yaxes(autorange="reversed")
-
-                bot_reply = f"Here’s the {variable.upper()} profile for float {float_id}."
-                st.session_state["messages"].append({"role": "assistant", "content": bot_reply})
-                st.chat_message("assistant").write(bot_reply)
-                st.chat_message("assistant").plotly_chart(fig, use_container_width=True)
-                plotted = True
-
-        if not plotted:
-            fallback_text = hybrid_fallback_answer(query)   # ✅ replaced
-            st.session_state["messages"].append({"role": "assistant", "content": fallback_text})
-            st.chat_message("assistant").write(fallback_text)
-            if df_chat.empty:
+        figure = result.get("figure")
+        if figure is not None:
+            assistant_chat.plotly_chart(figure, use_container_width=True)
+        else:
+            if result.get("row_count", 0) == 0 and result.get("applied_filters"):
                 st.chat_message("assistant").write("⚠️ Sorry, no matching profiles in dataset.")
-
+                
+                fallback_text = hybrid_fallback_answer(query)
+            if fallback_text:
+                st.session_state["messages"].append({"role": "assistant", "content": fallback_text})
+                st.chat_message("assistant").write(fallback_text)
     # Render history
     for msg in st.session_state["messages"]:
         st.chat_message(msg["role"]).write(msg["content"])
