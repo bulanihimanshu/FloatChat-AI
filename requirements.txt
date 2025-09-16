@@ -5,3 +5,7 @@ erddapy
 xarray
 netCDF4
 python-dotenv
+plotly
+streamlit
+openpyxl
+xlsxwriter

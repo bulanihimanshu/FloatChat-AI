@@ -1,33 +1,40 @@
 import pandas as pd
 from pathlib import Path
 
-# Path to your parquet file (adjust if needed)
-parquet_dir = Path("data_cache")
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Standardize column names for index vs profile parquet files.
+    """
+    rename_map = {
+        "time (UTC)": "time",
+        "latitude (degrees_north)": "latitude",
+        "longitude (degrees_east)": "longitude",
+        "pres (decibar)": "pres",
+        "temp (degree_Celsius)": "temp",
+        "psal (PSU)": "psal",
+    }
+    df = df.rename(columns=rename_map)
+    return df
 
-# Find the most recent parquet file
-parquet_files = sorted(parquet_dir.glob("*.parquet"), key=lambda p: p.stat().st_mtime, reverse=True)
-if not parquet_files:
-    raise FileNotFoundError("⚠️ No parquet files found in data_cache/")
-parquet_file = parquet_files[0]
 
-print(f"🔄 Loading {parquet_file}")
-df = pd.read_parquet(parquet_file)
+if __name__ == "__main__":
+    # Change file here for testing
+    path = Path("data_cache/argo_equator_mar2023.parquet")
 
-print("📌 Columns available:", df.columns.tolist())
-print("📊 Shape:", df.shape)
+    print(f"🔄 Loading {path}")
+    df = pd.read_parquet(path)
+    df = normalize_columns(df)
 
-# Detect structure
-if set(["latitude", "longitude", "temp", "psal"]).issubset(df.columns):
-    print("\n✅ Detected RAW / MULTI-RAW profile data")
-    print(df[["time", "latitude", "longitude", "pres", "temp", "psal"]].head())
+    print("📌 Columns available:", df.columns.tolist())
+    print("📊 Shape:", df.shape)
 
-elif set(["XAXIS", "YAXIS"]).issubset(df.columns):
-    print("\n📊 Detected FERRET grid data")
-    cols = ["XAXIS", "YAXIS"]
-    if "S_ANALYZED" in df.columns:
-        cols.append("S_ANALYZED")
-    print(df[cols].head())
-
-else:
-    print("\n⚠️ Unknown schema, showing first 5 rows")
-    print(df.head())
+    # Decide schema type
+    if {"time", "latitude", "longitude", "pres", "temp", "psal"}.issubset(df.columns):
+        print("\n✅ Detected RAW / MULTI-RAW profile data")
+        print(df[["time", "latitude", "longitude", "platform_number", "pres", "temp", "psal"]].head())
+    elif {"latitude", "longitude", "file"}.issubset(df.columns):
+        print("\n✅ Detected INDEX metadata")
+        print(df[["file", "date", "latitude", "longitude", "ocean"]].head())
+    else:
+        print("\n⚠️ Unknown schema, showing first 5 rows")
+        print(df.head())

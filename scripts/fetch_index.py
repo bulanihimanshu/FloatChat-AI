@@ -9,7 +9,7 @@ def fetch_index(use_cache=True):
     cache as Parquet for faster reloads.
     """
 
-    url = "./scripts/datasets/ArgoFloats-index_712b_5843_9069.csv"
+    url = "scripts\datasets\ArgoFloats-index_24d4_2d6b_36a6.csv"
 
     if use_cache and CACHE_PATH.exists():
         print(f"📂 Loading cached data from {CACHE_PATH}")
