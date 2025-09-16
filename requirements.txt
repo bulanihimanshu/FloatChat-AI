@@ -9,3 +9,9 @@ plotly
 streamlit
 openpyxl
 xlsxwriter
+folium
+streamlit-folium
+h5netcdf
+scipy
+openai
+duckduckgo-search
