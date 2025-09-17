@@ -2,6 +2,7 @@
 import calendar
 import os
 import io
+import ollama
 from pathlib import Path
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -964,6 +965,7 @@ with tab_chat:
         assistant_chat.write(assistant_text)
 
         figure = result.get("figure")
+        fallback_text = ""
         if figure is not None:
             assistant_chat.plotly_chart(figure, use_container_width=True)
         else:
