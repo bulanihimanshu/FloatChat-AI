@@ -2,7 +2,6 @@
 import calendar
 import os
 import io
-import ollama
 from pathlib import Path
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -14,6 +13,11 @@ import plotly.graph_objects as go
 from functools import lru_cache
 from dotenv import load_dotenv
 load_dotenv()
+
+try:
+    import ollama as _ollama_client
+except Exception:
+    _ollama_client = None
 
 # Optional deps (handled gracefully)
 try:
@@ -50,6 +54,13 @@ def web_search(query: str, num_results: int = 3) -> str:
         return f"(Web search unavailable: {e})"
 @lru_cache(maxsize=1)
 def _ollama_available() -> bool:
+    if _ollama_client is not None:
+        try:
+            _ollama_client.list()
+            return True
+        except Exception:
+            pass
+
     try:
         requests.get("http://localhost:11434/api/tags", timeout=2)
         return True
@@ -65,36 +76,62 @@ def ollama_answer(
     if not _ollama_available():
         return "⚠️ Local LLM unavailable: service not reachable on localhost:11434."
 
+    prompt = f"Question: {query}\n\nContext:\n{context.strip()}".strip()
+
+    if _ollama_client is not None:
+        try:
+            response = _ollama_client.chat(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are an expert assistant on oceans and ARGO data."},
+                    {"role": "user", "content": prompt},
+                ],
+                stream=False,
+            )
+            message = response.get("message", {}).get("content") if isinstance(response, dict) else None
+            if message:
+                return message.strip()
+        except Exception:
+            # Fall back to HTTP API below.
+            pass
+
     try:
         r = requests.post(
             "http://localhost:11434/api/chat",
             json={
                 "model": model,
+                "stream": False,
                 "messages": [
                     {"role": "system", "content": "You are an expert assistant on oceans and ARGO data."},
-                    {"role": "user", "content": f"Question: {query}\n\nContext:\n{context}"},
+                    {"role": "user", "content": prompt},
                 ],
             },
-            timeout=20,
+            timeout=30,
         )
         r.raise_for_status()
         data = r.json()
         message = data.get("message", {}).get("content")
-        return message or "(Received empty response from Ollama.)"
+        if message:
+            return message.strip()
+        return "(Received empty response from Ollama.)"
     except Exception as e:
         return f"⚠️ Local LLM unavailable: {e}"
 
 def hybrid_fallback_answer(query: str) -> str:
     """Fallback: web search + local LLM."""
     context = web_search(query)
-    
+    answer_parts: List[str] = []
+
     if _ollama_available():
         answer = ollama_answer(query, context)
         if answer:
-            return answer
+            answer_parts.append(answer)
 
     if context:
-        return "🔎 Web snippets:\n" + context
+        answer_parts.append("🔎 Web snippets:\n" + context)
+
+    if answer_parts:
+        return "\n\n".join(answer_parts)
 
     return "⚠️ Unable to fetch an AI answer right now."
 
@@ -126,7 +163,55 @@ st.markdown(
       .stPlotlyChart, .stPlotlyChart > div { opacity: 1 !important; transition: none !important; animation: none !important; }
       div[data-testid="stVerticalBlock"] { transition: none !important; }
       .st-emotion-cache-1629p8f { padding-top: 0 !important; } /* Streamlit minor layout fix */
+
+      /* Global loading overlay */
+      #floatchat-loading-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(4, 17, 38, 0.45);
+        backdrop-filter: blur(2px);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        gap: 0.75rem;
+        z-index: 9999;
+        color: #f0f6ff;
+        font-weight: 600;
+        letter-spacing: 0.03em;
+        transition: opacity 0.3s ease;
+      }
+
+      #floatchat-loading-overlay.hide {
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      .floatchat-spinner {
+        width: 54px;
+        height: 54px;
+        border-radius: 50%;
+        border: 5px solid rgba(240, 246, 255, 0.35);
+        border-top-color: #2f9bff;
+        animation: floatchat-spin 0.9s linear infinite;
+      }
+
+      @keyframes floatchat-spin {
+        to { transform: rotate(360deg); }
+      }
     </style>
+    <div id="floatchat-loading-overlay">
+      <div class="floatchat-spinner"></div>
+      <span>Loading dashboard…</span>
+    </div>
+    <script>
+      const overlay = document.getElementById('floatchat-loading-overlay');
+      if (overlay) {
+        const hideOverlay = () => overlay.classList.add('hide');
+        window.addEventListener('load', hideOverlay, { once: true });
+        setTimeout(hideOverlay, 1200);
+      }
+    </script>
     """,
     unsafe_allow_html=True,
 )
@@ -555,6 +640,60 @@ def sampled(df: pd.DataFrame, n: int = 10000, seed: int = 42) -> pd.DataFrame:
         return df
     return df.sample(n, random_state=seed)
 
+
+@st.cache_data
+def _export_bytes(df: pd.DataFrame) -> Dict[str, bytes]:
+    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    ascii_bytes = df.head(50_000).to_csv(sep=" ", index=False).encode("utf-8")
+
+    pq_buf = io.BytesIO()
+    df.to_parquet(pq_buf, index=False)
+    parquet_bytes = pq_buf.getvalue()
+
+    xlsx_buf = io.BytesIO()
+    df.head(1_000_000).to_excel(xlsx_buf, index=False, sheet_name="ArgoData")
+    excel_bytes = xlsx_buf.getvalue()
+
+    netcdf_bytes: Optional[bytes] = None
+    if xr is not None:
+        df_nc = df.head(100_000).copy()
+        for col in df_nc.select_dtypes(include=["category", "object"]).columns:
+            df_nc[col] = df_nc[col].astype(str)
+
+        try:
+            nc_buf = io.BytesIO()
+            xr.Dataset.from_dataframe(df_nc).to_netcdf(nc_buf)
+            netcdf_bytes = nc_buf.getvalue()
+        except Exception:
+            netcdf_bytes = None
+
+    return {
+        "csv": csv_bytes,
+        "ascii": ascii_bytes,
+        "parquet": parquet_bytes,
+        "excel": excel_bytes,
+        "netcdf": netcdf_bytes,
+    }
+
+
+@st.cache_data
+def _profile_statistics(df: pd.DataFrame) -> Dict[str, pd.Series]:
+    if df.empty:
+        return {}
+
+    grp = df.groupby("pres")
+    mean_t = grp["temp"].mean()
+    std_t = grp["temp"].std()
+    mean_s = grp["psal"].mean()
+    std_s = grp["psal"].std()
+
+    return {
+        "mean_temp": mean_t,
+        "std_temp": std_t,
+        "mean_sal": mean_s,
+        "std_sal": std_s,
+    }
+
 # -----------------------------
 # Live Data (cached)
 # -----------------------------
@@ -662,6 +801,21 @@ with col3:
     if "date" in df.columns and len(df) > 0:
         st.metric("Date Range", f"{df['date'].min().date()} → {df['date'].max().date()}")
 
+# Precompute commonly reused slices for snappier tab changes
+latlon_available = {"latitude", "longitude"}.issubset(df.columns)
+latlon_df = df[["latitude", "longitude"]].dropna() if latlon_available else pd.DataFrame()
+leaflet_points = (
+    sampled(latlon_df, min(max_points * 2, 50_000)) if not latlon_df.empty else pd.DataFrame()
+)
+cesium_points = (
+    sampled(latlon_df, min(max_points, 10_000)) if not latlon_df.empty else pd.DataFrame()
+)
+
+profile_cols_available = {"psal", "temp", "pres"}.issubset(df.columns)
+profile_core = df[["psal", "temp", "pres"]].dropna() if profile_cols_available else pd.DataFrame()
+ts_subset = sampled(profile_core, 5_000) if not profile_core.empty else profile_core
+profile_stats = _profile_statistics(profile_core) if not profile_core.empty else {}
+
 # -----------------------------
 # Tabs
 # -----------------------------
@@ -735,49 +889,52 @@ with tab_leaflet:
     st.subheader("🗺️ Leaflet (folium + clustering)")
     if folium is None or st_folium is None:
         st.warning("Install leaflet support:  pip install folium streamlit-folium")
-    elif {"latitude", "longitude"}.issubset(df.columns) and len(df) > 0:
-        ldf = sampled(df[["latitude", "longitude"]].dropna(), min(max_points*2, 50_000))
-        start_loc = INDIA_CENTER if focus_india and not world_view else (0, 0)
-        zoom = 5 if focus_india and not world_view else 2
+    elif latlon_available and len(latlon_df) > 0:
+        ldf = leaflet_points
+        if ldf.empty:
+            st.info("No lat/lon points available for the current filters.")
+        else:
+            start_loc = INDIA_CENTER if focus_india and not world_view else (0, 0)
+            zoom = 5 if focus_india and not world_view else 2
 
-        tiles = "OpenStreetMap" if theme == "Light" else "CartoDB dark_matter"
-        m = folium.Map(location=start_loc, zoom_start=zoom, tiles=tiles, control_scale=True)
-        cluster = MarkerCluster().add_to(m)
-        for lat, lon in zip(ldf["latitude"].values, ldf["longitude"].values):
-            folium.CircleMarker(
-                location=[float(lat), float(lon)],
-                radius=3,
-                fill=True,
-                fill_opacity=0.7,
-                color="#3388ff" if theme == "Light" else "#66aaff",
-            ).add_to(cluster)
-
-        if st.checkbox("Heatmap (approx)"):
-            HeatMap(ldf[["latitude", "longitude"]].values.tolist(), radius=8).add_to(m)
-
-        # Live overlays
-        if show_noaa:
-            noaa_df = load_noaa_buoys()
-            for _, r in noaa_df.iterrows():
+            tiles = "OpenStreetMap" if theme == "Light" else "CartoDB dark_matter"
+            m = folium.Map(location=start_loc, zoom_start=zoom, tiles=tiles, control_scale=True)
+            cluster = MarkerCluster().add_to(m)
+            for lat, lon in zip(ldf["latitude"].values, ldf["longitude"].values):
                 folium.CircleMarker(
-                    location=[float(r["latitude"]), float(r["longitude"])],
-                    radius=4, color="#ffcc00", fill=True, fill_opacity=0.9,
-                    popup=folium.Popup(f"NOAA: {r.get('name','')}", max_width=200),
-                ).add_to(m)
+                    location=[float(lat), float(lon)],
+                    radius=3,
+                    fill=True,
+                    fill_opacity=0.7,
+                    color="#3388ff" if theme == "Light" else "#66aaff",
+                ).add_to(cluster)
 
-        if show_incois:
-            incois_df = load_incois_buoys()
-            for _, r in incois_df.iterrows():
-                txt = f"INCOIS: {r.get('station_id','')}"
-                if "sst" in r and "wind_speed" in r:
-                    txt += f"<br>SST: {r['sst']} °C<br>Wind: {r['wind_speed']} m/s"
-                folium.CircleMarker(
-                    location=[float(r["latitude"]), float(r["longitude"])],
-                    radius=5, color="#22aa44", fill=True, fill_opacity=0.9,
-                    popup=folium.Popup(txt, max_width=220),
-                ).add_to(m)
+            if st.checkbox("Heatmap (approx)"):
+                HeatMap(ldf[["latitude", "longitude"]].values.tolist(), radius=8).add_to(m)
 
-        st_folium(m, height=620, width=None)
+            # Live overlays
+            if show_noaa:
+                noaa_df = load_noaa_buoys()
+                for _, r in noaa_df.iterrows():
+                    folium.CircleMarker(
+                        location=[float(r["latitude"]), float(r["longitude"])],
+                        radius=4, color="#ffcc00", fill=True, fill_opacity=0.9,
+                        popup=folium.Popup(f"NOAA: {r.get('name','')}", max_width=200),
+                    ).add_to(m)
+
+            if show_incois:
+                incois_df = load_incois_buoys()
+                for _, r in incois_df.iterrows():
+                    txt = f"INCOIS: {r.get('station_id','')}"
+                    if "sst" in r and "wind_speed" in r:
+                        txt += f"<br>SST: {r['sst']} °C<br>Wind: {r['wind_speed']} m/s"
+                    folium.CircleMarker(
+                        location=[float(r["latitude"]), float(r["longitude"])],
+                        radius=5, color="#22aa44", fill=True, fill_opacity=0.9,
+                        popup=folium.Popup(txt, max_width=220),
+                    ).add_to(m)
+
+            st_folium(m, height=620, width=None)
     else:
         st.info("No lat/lon columns to plot.")
 
@@ -789,43 +946,46 @@ with tab_cesium:
     st.caption("Tip: set CESIUM_ION_TOKEN env variable for premium imagery/terrain.")
     cesium_token = os.getenv("CESIUM_ION_TOKEN", "")
 
-    cdf = sampled(df[["latitude", "longitude"]].dropna(), min(max_points, 10000))
-    points_js = [
-        f'{{ "lat": {float(r.latitude):.6f}, "lon": {float(r.longitude):.6f} }}'
-        for r in cdf.itertuples(index=False)
-    ]
+    cdf = cesium_points
+    if cdf.empty:
+        st.info("No latitude/longitude data available for the 3D globe.")
+    else:
+        points_js = [
+            f'{{ "lat": {float(r.latitude):.6f}, "lon": {float(r.longitude):.6f} }}'
+            for r in cdf.itertuples(index=False)
+        ]
 
-    html = f"""
-    <div id="cesiumContainer" style="width:100%;height:620px;"></div>
-    <script src="https://cesium.com/downloads/cesiumjs/releases/1.118/Build/Cesium/Cesium.js"></script>
-    <link href="https://cesium.com/downloads/cesiumjs/releases/1.118/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
-    <script>
-      window.CESIUM_BASE_URL = "https://cesium.com/downloads/cesiumjs/releases/1.118/Build/Cesium/";
-      const viewer = new Cesium.Viewer('cesiumContainer', {{
-        timeline: false, animation: false, sceneModePicker: false,
-        baseLayerPicker: true
-      }});
-      {"Cesium.Ion.defaultAccessToken='" + cesium_token + "';" if cesium_token else ""}
+        html = f"""
+        <div id=\"cesiumContainer\" style=\"width:100%;height:620px;\"></div>
+        <script src=\"https://cesium.com/downloads/cesiumjs/releases/1.118/Build/Cesium/Cesium.js\"></script>
+        <link href=\"https://cesium.com/downloads/cesiumjs/releases/1.118/Build/Cesium/Widgets/widgets.css\" rel=\"stylesheet\">
+        <script>
+          window.CESIUM_BASE_URL = \"https://cesium.com/downloads/cesiumjs/releases/1.118/Build/Cesium/\";
+          const viewer = new Cesium.Viewer('cesiumContainer', {{
+            timeline: false, animation: false, sceneModePicker: false,
+            baseLayerPicker: true
+          }});
+          {"Cesium.Ion.defaultAccessToken='" + cesium_token + "';" if cesium_token else ""}
 
-      const pts = [{",".join(points_js)}];
-      pts.forEach(p => viewer.entities.add({{
-        position: Cesium.Cartesian3.fromDegrees(p.lon, p.lat),
-        point: {{ pixelSize: 4, color: Cesium.Color.CYAN }}
-      }}));
+          const pts = [{",".join(points_js)}];
+          pts.forEach(p => viewer.entities.add({{
+            position: Cesium.Cartesian3.fromDegrees(p.lon, p.lat),
+            point: {{ pixelSize: 4, color: Cesium.Color.CYAN }}
+          }}));
 
-      // Focus India by default
-      const center = Cesium.Cartesian3.fromDegrees({INDIA_CENTER[1]}, {INDIA_CENTER[0]}, 2_000_000);
-      viewer.camera.flyTo({{ destination: center }});
-    </script>
-    """
-    st.components.v1.html(html, height=640, scrolling=False)
+          // Focus India by default
+          const center = Cesium.Cartesian3.fromDegrees({INDIA_CENTER[1]}, {INDIA_CENTER[0]}, 2_000_000);
+          viewer.camera.flyTo({{ destination: center }});
+        </script>
+        """
+        st.components.v1.html(html, height=640, scrolling=False)
 
 # -----------------------------
 # Profiles (TS, Depth)
 # -----------------------------
 with tab_profiles:
     st.subheader("🌊 Profiles")
-    if {"pres", "temp", "psal"}.issubset(df.columns) and len(df) > 0:
+    if profile_cols_available and len(profile_core) > 0:
         # Choose float/profile if available
         if "platform_number" in df.columns:
             ids = df["platform_number"].dropna().unique().tolist()
@@ -851,31 +1011,40 @@ with tab_profiles:
                 st.plotly_chart(fig_s, use_container_width=True)
 
         st.markdown("### 🌡️ TS Diagram (subset for speed)")
-        ts_df = sampled(df[["psal", "temp", "pres"]].dropna(), 5000)
-        fig_ts = px.scatter(
-            ts_df, x="psal", y="temp", color="pres",
-            color_continuous_scale="Viridis",
-            labels={"psal":"Salinity (PSU)", "temp":"Temperature (°C)", "pres":"Pressure (dbar)"},
-            template=plotly_template
-        )
-        st.plotly_chart(fig_ts, use_container_width=True)
+        if ts_subset.empty:
+            st.info("Not enough temperature/salinity samples to draw a TS diagram.")
+        else:
+            fig_ts = px.scatter(
+                ts_subset,
+                x="psal",
+                y="temp",
+                color="pres",
+                color_continuous_scale="Viridis",
+                labels={"psal": "Salinity (PSU)", "temp": "Temperature (°C)", "pres": "Pressure (dbar)"},
+                template=plotly_template,
+            )
+            st.plotly_chart(fig_ts, use_container_width=True)
 
         st.markdown("### 📉 Mean Vertical Profiles (±1σ)")
-        grp = df.dropna(subset=["pres","temp","psal"]).groupby("pres")
-        mean_t, std_t = grp["temp"].mean(), grp["temp"].std()
-        mean_s, std_s = grp["psal"].mean(), grp["psal"].std()
+        if not profile_stats:
+            st.info("Mean profile statistics are unavailable for the current selection.")
+        else:
+            mean_t = profile_stats["mean_temp"]
+            std_t = profile_stats["std_temp"]
+            mean_s = profile_stats["mean_sal"]
+            std_s = profile_stats["std_sal"]
 
-        fig_mp = go.Figure()
-        fig_mp.add_trace(go.Scatter(x=mean_t, y=mean_t.index, name="Mean Temp", mode="lines", line=dict(color="red")))
-        fig_mp.add_trace(go.Scatter(x=(mean_t+std_t), y=mean_t.index, name="Temp +1σ", mode="lines", line=dict(color="red", dash="dot")))
-        fig_mp.add_trace(go.Scatter(x=(mean_t-std_t), y=mean_t.index, name="Temp -1σ", mode="lines", line=dict(color="red", dash="dot"),
-                                    fill="tonexty", fillcolor="rgba(255,0,0,0.12)"))
-        fig_mp.add_trace(go.Scatter(x=mean_s, y=mean_s.index, name="Mean Sal", mode="lines", line=dict(color="blue")))
-        fig_mp.add_trace(go.Scatter(x=(mean_s+std_s), y=mean_s.index, name="Sal +1σ", mode="lines", line=dict(color="blue", dash="dot")))
-        fig_mp.add_trace(go.Scatter(x=(mean_s-std_s), y=mean_s.index, name="Sal -1σ", mode="lines", line=dict(color="blue", dash="dot"),
-                                    fill="tonexty", fillcolor="rgba(0,0,255,0.12)"))
-        fig_mp.update_layout(yaxis=dict(title="Pressure (dbar)", autorange="reversed"), height=600, template=plotly_template)
-        st.plotly_chart(fig_mp, use_container_width=True)
+            fig_mp = go.Figure()
+            fig_mp.add_trace(go.Scatter(x=mean_t, y=mean_t.index, name="Mean Temp", mode="lines", line=dict(color="red")))
+            fig_mp.add_trace(go.Scatter(x=(mean_t + std_t), y=mean_t.index, name="Temp +1σ", mode="lines", line=dict(color="red", dash="dot")))
+            fig_mp.add_trace(go.Scatter(x=(mean_t - std_t), y=mean_t.index, name="Temp -1σ", mode="lines", line=dict(color="red", dash="dot"),
+                                        fill="tonexty", fillcolor="rgba(255,0,0,0.12)"))
+            fig_mp.add_trace(go.Scatter(x=mean_s, y=mean_s.index, name="Mean Sal", mode="lines", line=dict(color="blue")))
+            fig_mp.add_trace(go.Scatter(x=(mean_s + std_s), y=mean_s.index, name="Sal +1σ", mode="lines", line=dict(color="blue", dash="dot")))
+            fig_mp.add_trace(go.Scatter(x=(mean_s - std_s), y=mean_s.index, name="Sal -1σ", mode="lines", line=dict(color="blue", dash="dot"),
+                                        fill="tonexty", fillcolor="rgba(0,0,255,0.12)"))
+            fig_mp.update_layout(yaxis=dict(title="Pressure (dbar)", autorange="reversed"), height=600, template=plotly_template)
+            st.plotly_chart(fig_mp, use_container_width=True)
     else:
         st.info("ℹ️ This dataset has no profile data. "
                 "Please load a raw ARGO profile parquet "
@@ -896,49 +1065,48 @@ with tab_table:
 # -----------------------------
 with tab_export:
     st.subheader("💾 Export (filtered)")
-    # CSV full
-    csv_bytes = df.to_csv(index=False).encode("utf-8")
-    st.download_button("⬇️ CSV (full)", data=csv_bytes, file_name=f"{file_choice.stem}_filtered.csv", mime="text/csv")
+    with st.spinner("Preparing download files..."):
+        export_payloads = _export_bytes(df)
 
-    # ASCII (space-delimited) — first 50k rows
-    ascii_bytes = df.head(50_000).to_csv(sep=" ", index=False).encode("utf-8")
-    st.download_button("⬇️ ASCII (first 50k)", data=ascii_bytes, file_name=f"{file_choice.stem}_filtered.txt", mime="text/plain")
+    st.download_button(
+        "⬇️ CSV (full)",
+        data=export_payloads["csv"],
+        file_name=f"{file_choice.stem}_filtered.csv",
+        mime="text/csv",
+    )
 
-    # Parquet full
-    pq_buf = io.BytesIO()
-    df.to_parquet(pq_buf, index=False)
-    pq_buf.seek(0)
-    st.download_button("⬇️ Parquet (full)", data=pq_buf, file_name=f"{file_choice.stem}_filtered.parquet", mime="application/octet-stream")
+    st.download_button(
+        "⬇️ ASCII (first 50k)",
+        data=export_payloads["ascii"],
+        file_name=f"{file_choice.stem}_filtered.txt",
+        mime="text/plain",
+    )
 
-    # Excel limited to 1,000,000 rows (Excel limit ~1,048,576)
-    xlsx_buf = io.BytesIO()
-    df.head(1_000_000).to_excel(xlsx_buf, index=False, sheet_name="ArgoData")
-    xlsx_buf.seek(0)
-    st.download_button("⬇️ Excel (≤1M rows)", data=xlsx_buf, file_name=f"{file_choice.stem}_filtered.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button(
+        "⬇️ Parquet (full)",
+        data=export_payloads["parquet"],
+        file_name=f"{file_choice.stem}_filtered.parquet",
+        mime="application/octet-stream",
+    )
 
-    # NetCDF (needs xarray) — cap rows to keep file size sane
+    st.download_button(
+        "⬇️ Excel (≤1M rows)",
+        data=export_payloads["excel"],
+        file_name=f"{file_choice.stem}_filtered.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
     if xr is None:
         st.info("Install xarray to enable NetCDF export:  pip install xarray netcdf4")
+    elif export_payloads["netcdf"] is None:
+        st.warning("⚠️ NetCDF export unavailable for this dataset or conversion failed.")
     else:
-        nc_buf = io.BytesIO()
-        df_nc = df.head(100_000).copy()
-
-        # 🔧 Ensure categorical/object cols are converted before NetCDF export
-        for col in df_nc.select_dtypes(include=["category", "object"]).columns:
-            df_nc[col] = df_nc[col].astype(str)
-
-        try:
-            xr.Dataset.from_dataframe(df_nc).to_netcdf(nc_buf)
-            nc_buf.seek(0)
-            st.download_button(
-                "⬇️ NetCDF (first 100k)",
-                data=nc_buf,
-                file_name=f"{file_choice.stem}_filtered.nc",
-                mime="application/octet-stream",
-            )
-        except Exception as e:
-            st.error(f"⚠️ NetCDF export failed: {e}")
+        st.download_button(
+            "⬇️ NetCDF (first 100k)",
+            data=export_payloads["netcdf"],
+            file_name=f"{file_choice.stem}_filtered.nc",
+            mime="application/octet-stream",
+        )
 # -----------------------------
 # Chatbot Tab (Hybrid Mode, Cleaned)
 # -----------------------------
