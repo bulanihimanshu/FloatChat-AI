@@ -957,22 +957,36 @@ with tab_chat:
             result = run_query_pipeline(query, df_full, plotly_template)
 
         assistant_text = result.get("reply") or "I couldn't interpret that request with the available data."
-        st.session_state["messages"].append({"role": "assistant", "content": assistant_text})
+        figure = result.get("figure")
+        fallback_text: Optional[str] = None
+        show_no_match_notice = False
+
+        if figure is None:
+            if result.get("row_count", 0) == 0 and result.get("applied_filters"):
+                show_no_match_notice = True
+                fallback_text = hybrid_fallback_answer(query)
+            elif not result.get("applied_filters"):
+                fallback_response = hybrid_fallback_answer(query)
+                if fallback_response:
+                    assistant_text = fallback_response
+                    fallback_text = None
+                    figure = None
+
         assistant_chat = st.chat_message("assistant")
+        st.session_state["messages"].append({"role": "assistant", "content": assistant_text})
         assistant_chat.write(assistant_text)
 
-        figure = result.get("figure")
-        fallback_text : Optional[str] = None
         if figure is not None:
             assistant_chat.plotly_chart(figure, use_container_width=True)
-        else:
-            if result.get("row_count", 0) == 0 and result.get("applied_filters"):
-                st.chat_message("assistant").write("⚠️ Sorry, no matching profiles in dataset.")
-                
-                fallback_text = hybrid_fallback_answer(query)
-            if fallback_text:
-                st.session_state["messages"].append({"role": "assistant", "content": fallback_text})
-                st.chat_message("assistant").write(fallback_text)
+
+        if show_no_match_notice:
+            warning_text = "⚠️ Sorry, no matching profiles in dataset."
+            st.session_state["messages"].append({"role": "assistant", "content": warning_text})
+            st.chat_message("assistant").write(warning_text)
+
+        if fallback_text:
+            st.session_state["messages"].append({"role": "assistant", "content": fallback_text})
+            st.chat_message("assistant").write(fallback_text)
     # Render history
     for msg in st.session_state["messages"]:
         st.chat_message(msg["role"]).write(msg["content"])
