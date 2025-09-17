@@ -205,12 +205,41 @@ st.markdown(
       <span>Loading dashboard…</span>
     </div>
     <script>
-      const overlay = document.getElementById('floatchat-loading-overlay');
-      if (overlay) {
-        const hideOverlay = () => overlay.classList.add('hide');
-        window.addEventListener('load', hideOverlay, { once: true });
-        setTimeout(hideOverlay, 1200);
+      const overlayId = 'floatchat-loading-overlay';
+      const overlays = Array.from(document.querySelectorAll(`#${overlayId}`));
+
+      // Remove any previously injected overlays to avoid duplicates.
+      if (overlays.length > 1) {
+        overlays.slice(0, -1).forEach((node) => node.remove());
       }
+
+      let overlay = overlays.pop();
+      if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = overlayId;
+        overlay.className = 'hide';
+        overlay.innerHTML = `
+          <div class="floatchat-spinner"></div>
+          <span>Loading dashboard…</span>
+        `;
+        document.body.appendChild(overlay);
+      }
+
+      const hideOverlay = () => {
+        document
+          .querySelectorAll(`#${overlayId}`)
+          .forEach((node) => node.classList.add('hide'));
+      };
+
+      const showOverlay = () => {
+        document
+          .querySelectorAll(`#${overlayId}`)
+          .forEach((node) => node.classList.remove('hide'));
+      };
+
+      showOverlay();
+      window.addEventListener('load', hideOverlay, { once: true });
+      setTimeout(hideOverlay, 1200);
     </script>
     """,
     unsafe_allow_html=True,
