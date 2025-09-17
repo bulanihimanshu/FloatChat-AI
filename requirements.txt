@@ -14,5 +14,5 @@ streamlit-folium
 h5netcdf
 scipy
 openai
-duckduckgo-search
+ddgs
 ollama

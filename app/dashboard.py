@@ -34,8 +34,7 @@ except Exception:
 import requests
 
 # Local LLM + Web Search
-from duckduckgo_search import DDGS
-
+from ddgs import DDGS
 def web_search(query: str, num_results: int = 3) -> str:
     """Fetch snippets from DuckDuckGo search (no API key needed)."""
     try:
@@ -49,7 +48,6 @@ def web_search(query: str, num_results: int = 3) -> str:
         return "\n".join(snippets[:num_results]) if snippets else ""
     except Exception as e:
         return f"(Web search unavailable: {e})"
-
 @lru_cache(maxsize=1)
 def _ollama_available() -> bool:
     try:
@@ -58,16 +56,15 @@ def _ollama_available() -> bool:
     except Exception:
         return False
 
-def ollama_answer(query: str, context: str = "", model: str = "llama3") -> str:
+def ollama_answer(
+    query: str,
+    context: str = "",
+    model: str = os.getenv("OLLAMA_MODEL", "mistral"),
+) -> str:
     """Ask a local Ollama model (free) with optional web context."""
     if not _ollama_available():
         return "⚠️ Local LLM unavailable: service not reachable on localhost:11434."
-    
-    
-    
-    
-    
-    
+
     try:
         r = requests.post(
             "http://localhost:11434/api/chat",
@@ -965,7 +962,7 @@ with tab_chat:
         assistant_chat.write(assistant_text)
 
         figure = result.get("figure")
-        fallback_text = ""
+        fallback_text : Optional[str] = None
         if figure is not None:
             assistant_chat.plotly_chart(figure, use_container_width=True)
         else:
