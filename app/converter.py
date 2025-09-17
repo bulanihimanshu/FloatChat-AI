@@ -24,13 +24,16 @@ wanted_cols = [
 available_cols = [c for c in wanted_cols if c in df.columns]
 df = df[available_cols]
 
-# Clean numeric fields
-for col in ["latitude", "longitude"]:
-    if col in df.columns:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+# Clean numeric fields (if present)
+coord_cols = [col for col in ["latitude", "longitude"] if col in df.columns]
+for col in coord_cols:
+    df[col] = pd.to_numeric(df[col], errors="coerce")
 
-# Drop rows with missing lat/lon (cannot plot otherwise)
-df = df.dropna(subset=["latitude", "longitude"])
+# Drop rows with missing coordinates only when columns exist
+if coord_cols:
+    df = df.dropna(subset=coord_cols)
+else:
+    print("⚠️ Warning: latitude/longitude columns not found in source CSV; skipping coordinate cleanup.")
 
 # Save
 Path("data_cache").mkdir(exist_ok=True)
