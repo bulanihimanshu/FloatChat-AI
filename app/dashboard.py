@@ -230,7 +230,8 @@ def _normalize_theme(value: Optional[str]) -> str:
 def _load_theme_preference() -> Tuple[str, Dict[str, List[str]]]:
     """Read persisted theme from query params or session state."""
 
-    query_params = st.experimental_get_query_params()
+    query_params_proxy = st.query_params
+    query_params = {key: query_params_proxy.get_all(key) for key in query_params_proxy.keys()}
     if "theme" in query_params and query_params["theme"]:
         theme_choice = _normalize_theme(query_params["theme"][0])
     elif "theme" in st.session_state:
@@ -246,9 +247,17 @@ def _persist_theme(theme_choice: str, query_params: Dict[str, List[str]]) -> Non
     """Update session + URL query params so theme survives reloads."""
 
     st.session_state["theme"] = theme_choice
-    updated = {k: v for k, v in query_params.items() if k != "theme"}
+    updated = {}
+    for key, values in query_params.items():
+        if key == "theme" or not values:
+            continue
+        if len(values) == 1:
+            updated[key] = values[0]
+        else:
+            updated[key] = values
     updated["theme"] = theme_choice.lower()
-    st.experimental_set_query_params(**updated)
+    st.query_params.clear()
+    st.query_params.update(updated)
 
 
 def _apply_theme_styles(theme_choice: str) -> None:
@@ -681,7 +690,7 @@ def load_parquet(path: Path) -> pd.DataFrame:
     # Normalize date timezone -> naive for filtering speed/safety
     if "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        if pd.api.types.is_datetime64tz_dtype(df["date"]):
+        if isinstance(df["date"].dtype, pd.DatetimeTZDtype):
             df["date"] = df["date"].dt.tz_convert(None)
     return memory_efficient_cast(df)
 
@@ -990,7 +999,7 @@ with tab_plotly:
             max_points
         )
 
-        base_fig = px.scatter_mapbox(
+        base_fig = px.scatter_map(
             plot_df,
             lat="latitude",
             lon="longitude",
@@ -999,16 +1008,21 @@ with tab_plotly:
             height=620,
             zoom=3 if focus_india and not world_view else 1.5,
             center=dict(lat=INDIA_CENTER[0], lon=INDIA_CENTER[1]) if focus_india and not world_view else dict(lat=0, lon=0),
+            map_style=map_style,
             template=plotly_template,
         )
-        base_fig.update_layout(mapbox_style=map_style, margin=dict(l=0, r=0, t=0, b=0))
+        base_fig.update_layout(
+            map=dict(style=map_style),
+            mapbox=dict(style=map_style),
+            margin=dict(l=0, r=0, t=0, b=0),
+        )
 
         # Add live layers
         layers = []
         if show_noaa:
             noaa_df = load_noaa_buoys()
             if not noaa_df.empty:
-                layers.append(px.scatter_mapbox(
+                layers.append(px.scatter_map(
                     noaa_df, lat="latitude", lon="longitude",
                     hover_name="name", color_discrete_sequence=["yellow"]
                 ).data[0])
@@ -1026,13 +1040,18 @@ with tab_plotly:
                 else:
                     hover_field = "station_id" if "station_id" in incois_hover.columns else incois_hover.columns[0]
 
-                layers.append(px.scatter_mapbox(
+                layers.append(px.scatter_map(
                     incois_hover, lat="latitude", lon="longitude",
                     hover_name=hover_field, color_discrete_sequence=["green"]
                 ).data[0])
 
         fig = go.Figure(data=base_fig.data + tuple(layers))
-        fig.update_layout(mapbox_style=map_style, margin=dict(l=0, r=0, t=0, b=0), template=plotly_template)
+        fig.update_layout(
+            map=dict(style=map_style),
+            mapbox=dict(style=map_style),
+            margin=dict(l=0, r=0, t=0, b=0),
+            template=plotly_template,
+        )
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("No lat/lon columns to plot.")
