@@ -212,7 +212,7 @@ PLOTLY_TEMPLATES = {
 MAP_STYLES_LIGHT = ["open-street-map", "carto-positron", "stamen-terrain"]
 MAP_STYLES_DARK = ["carto-darkmatter", "stamen-toner"]
 
-THEME_OPTIONS = ("Light", "Dark")
+THEME_OPTIONS = ("Dark", "Light")
 THEME_PALETTES: Dict[str, Dict[str, str]] = {
     "Light": {
         "background": "#f5f7fb",
@@ -231,6 +231,27 @@ THEME_PALETTES: Dict[str, Dict[str, str]] = {
         "accent_soft": "#1b2a46",
     },
 }
+
+MAP_LEGEND_ITEMS: Tuple[Dict[str, str], ...] = (
+    {
+        "key": "argo",
+        "label": "ARGO Floats",
+        "color": "#38bdf8",
+        "description": "Profiles from the selected dataset",
+    },
+    {
+        "key": "noaa",
+        "label": "NOAA Buoys",
+        "color": "#facc15",
+        "description": "National Data Buoy Center network",
+    },
+    {
+        "key": "incois",
+        "label": "INCOIS Moorings",
+        "color": "#22c55e",
+        "description": "Indian moored buoy observations",
+    },
+)
 
 PLACE_RADIUS_DEG = 2.5
 AGGREGATION_KEYWORDS: Dict[str, str] = {
@@ -456,6 +477,49 @@ def _apply_theme_styles(theme_choice: str) -> None:
         """,
         unsafe_allow_html=True,
     )
+
+
+def render_map_legend(theme_choice: str, show_noaa: bool, show_incois: bool) -> None:
+    palette = THEME_PALETTES.get(theme_choice, THEME_PALETTES[THEME_OPTIONS[0]])
+    bg = palette["surface"]
+    text_color = palette["text"]
+    muted = palette["muted_text"]
+    visibility = {
+        "argo": True,
+        "noaa": show_noaa,
+        "incois": show_incois,
+    }
+
+    legend_html_parts = [
+        f"<div class='map-legend' style='background:{bg};color:{text_color};border:1px solid {palette['accent_soft']};"
+        "border-radius:14px;padding:1rem;box-shadow:0 6px 18px rgba(15,23,42,0.12);'>"
+    ]
+
+    for item in MAP_LEGEND_ITEMS:
+        active = visibility.get(item["key"], False)
+        opacity = 1.0 if active else 0.4
+        status = "" if active else " (hidden)"
+        legend_html_parts.append(
+            """
+            <div style="display:flex;align-items:flex-start;margin-bottom:0.75rem;opacity:{opacity};">
+              <span style="flex:none;width:16px;height:16px;border-radius:4px;background:{color};margin-top:2px;margin-right:0.65rem;"></span>
+              <div style="font-size:0.85rem;line-height:1.3;">
+                <strong>{label}{status}</strong><br>
+                <span style="color:{muted};">{description}</span>
+              </div>
+            </div>
+            """.format(
+                opacity=opacity,
+                color=item["color"],
+                label=item["label"],
+                status=status,
+                muted=muted,
+                description=item["description"],
+            )
+        )
+
+    legend_html_parts.append("</div>")
+    st.markdown("".join(legend_html_parts), unsafe_allow_html=True)
 
 # -----------------------------
 # Query parsing + chat helpers
@@ -1176,8 +1240,15 @@ with st.sidebar:
 
     st.divider()
     st.header("🗺️ Map View")
-    focus_india = st.checkbox("🇮🇳 Focus India (default)", value=True)
-    world_view = st.checkbox("🌍 World view", value=False)
+    focus_choice = st.radio(
+        "Map focus",
+        ("🇮🇳 India", "🌍 World"),
+        horizontal=True,
+        index=0,
+        help="Toggle between an India-centric view or the full globe.",
+    )
+    focus_india = focus_choice.startswith("🇮🇳")
+    world_view = not focus_india
 
     # Reset map style when switching between light/dark palettes for readability
     map_style_default = MAP_STYLES_LIGHT[0] if theme == "Light" else MAP_STYLES_DARK[0]
@@ -1342,125 +1413,157 @@ tab_plotly, tab_leaflet, tab_cesium, tab_profiles, tab_table, tab_export, tab_ch
 # -----------------------------
 with tab_plotly:
     st.subheader("🗺️ Plotly Map")
-    if {"latitude", "longitude"}.issubset(df.columns) and len(df) > 0:
-        hover_col = "platform_number" if "platform_number" in df.columns else ("file" if "file" in df.columns else df.columns[0])
-        plot_df = sampled(
-            df[["latitude", "longitude", hover_col] + (["ocean"] if "ocean" in df.columns else [])],
-            max_points
-        )
+    map_col, legend_col = st.columns((5, 1))
 
-        base_fig = px.scatter_map(
-            plot_df,
-            lat="latitude",
-            lon="longitude",
-            hover_name=hover_col,
-            color="ocean" if "ocean" in plot_df.columns else None,
-            height=620,
-            zoom=3 if focus_india and not world_view else 1.5,
-            center=dict(lat=INDIA_CENTER[0], lon=INDIA_CENTER[1]) if focus_india and not world_view else dict(lat=0, lon=0),
-            map_style=map_style,
-            template=plotly_template,
-        )
-        base_fig.update_layout(
-            map=dict(style=map_style),
-            mapbox=dict(style=map_style),
-            margin=dict(l=0, r=0, t=0, b=0),
-        )
+    with map_col:
+        if {"latitude", "longitude"}.issubset(df.columns) and len(df) > 0:
+            hover_col = "platform_number" if "platform_number" in df.columns else ("file" if "file" in df.columns else df.columns[0])
+            plot_df = sampled(
+                df[["latitude", "longitude", hover_col]],
+                max_points
+            )
 
-        # Add live layers
-        layers = []
-        if show_noaa:
-            noaa_df = load_noaa_buoys()
-            if not noaa_df.empty:
-                layers.append(px.scatter_map(
-                    noaa_df, lat="latitude", lon="longitude",
-                    hover_name="name", color_discrete_sequence=["yellow"]
-                ).data[0])
-        if show_incois:
-            incois_df = load_incois_buoys()
-            if not incois_df.empty:
-                incois_hover = incois_df.copy()
-                if {"sst", "wind_speed"}.issubset(incois_hover.columns):
-                    incois_hover["hover"] = (
-                        "Station " + incois_hover.get("station_id", pd.Series(["NA"]*len(incois_hover))).astype(str) +
-                        "<br>SST: " + incois_hover["sst"].astype(str) +
-                        " °C<br>Wind: " + incois_hover["wind_speed"].astype(str) + " m/s"
-                    )
-                    hover_field = "hover"
-                else:
-                    hover_field = "station_id" if "station_id" in incois_hover.columns else incois_hover.columns[0]
+            base_fig = px.scatter_map(
+                plot_df,
+                lat="latitude",
+                lon="longitude",
+                hover_name=hover_col,
+                height=620,
+                zoom=3 if focus_india and not world_view else 1.5,
+                center=dict(lat=INDIA_CENTER[0], lon=INDIA_CENTER[1]) if focus_india and not world_view else dict(lat=0, lon=0),
+                map_style=map_style,
+                template=plotly_template,
+                color_discrete_sequence=[item["color"] for item in MAP_LEGEND_ITEMS if item["key"] == "argo"],
+            )
+            base_fig.update_traces(marker=dict(size=8, opacity=0.85))
+            base_fig.update_layout(
+                map=dict(style=map_style),
+                mapbox=dict(style=map_style),
+                margin=dict(l=0, r=0, t=0, b=0),
+            )
 
-                layers.append(px.scatter_map(
-                    incois_hover, lat="latitude", lon="longitude",
-                    hover_name=hover_field, color_discrete_sequence=["green"]
-                ).data[0])
+            # Add live layers
+            layers = []
+            if show_noaa:
+                noaa_df = load_noaa_buoys()
+                if not noaa_df.empty:
+                    noaa_layer = px.scatter_map(
+                        noaa_df,
+                        lat="latitude",
+                        lon="longitude",
+                        hover_name="name",
+                        color_discrete_sequence=[item["color"] for item in MAP_LEGEND_ITEMS if item["key"] == "noaa"],
+                    ).data[0]
+                    noaa_layer.marker.update(size=9, opacity=0.9)
+                    layers.append(noaa_layer)
+            if show_incois:
+                incois_df = load_incois_buoys()
+                if not incois_df.empty:
+                    incois_hover = incois_df.copy()
+                    if {"sst", "wind_speed"}.issubset(incois_hover.columns):
+                        incois_hover["hover"] = (
+                            "Station " + incois_hover.get("station_id", pd.Series(["NA"] * len(incois_hover))).astype(str) +
+                            "<br>SST: " + incois_hover["sst"].astype(str) +
+                            " °C<br>Wind: " + incois_hover["wind_speed"].astype(str) + " m/s"
+                        )
+                        hover_field = "hover"
+                    else:
+                        hover_field = "station_id" if "station_id" in incois_hover.columns else incois_hover.columns[0]
 
-        fig = go.Figure(data=base_fig.data + tuple(layers))
-        fig.update_layout(
-            map=dict(style=map_style),
-            mapbox=dict(style=map_style),
-            margin=dict(l=0, r=0, t=0, b=0),
-            template=plotly_template,
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No lat/lon columns to plot.")
+                    incois_layer = px.scatter_map(
+                        incois_hover,
+                        lat="latitude",
+                        lon="longitude",
+                        hover_name=hover_field,
+                        color_discrete_sequence=[item["color"] for item in MAP_LEGEND_ITEMS if item["key"] == "incois"],
+                    ).data[0]
+                    incois_layer.marker.update(size=9, opacity=0.9)
+                    layers.append(incois_layer)
+
+            fig = go.Figure(data=base_fig.data + tuple(layers))
+            fig.update_layout(
+                map=dict(style=map_style),
+                mapbox=dict(style=map_style),
+                margin=dict(l=0, r=0, t=0, b=0),
+                template=plotly_template,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No lat/lon columns to plot.")
+
+    with legend_col:
+        render_map_legend(theme, show_noaa, show_incois)
 
 # -----------------------------
 # Leaflet Map (fast clustering)
 # -----------------------------
 with tab_leaflet:
     st.subheader("🗺️ Leaflet (folium + clustering)")
-    if folium is None or MarkerCluster is None:
-        st.warning("Install leaflet support:  pip install folium")
-    elif latlon_available and len(latlon_df) > 0:
-        ldf = leaflet_points
-        if ldf.empty:
-            st.info("No lat/lon points available for the current filters.")
+    map_col, legend_col = st.columns((5, 1))
+
+    with map_col:
+        if folium is None or MarkerCluster is None:
+            st.warning("Install leaflet support:  pip install folium")
+        elif latlon_available and len(latlon_df) > 0:
+            ldf = leaflet_points
+            if ldf.empty:
+                st.info("No lat/lon points available for the current filters.")
+            else:
+                start_loc = INDIA_CENTER if focus_india and not world_view else (0, 0)
+                zoom = 5 if focus_india and not world_view else 2
+
+                tiles = "OpenStreetMap" if theme == "Light" else "CartoDB dark_matter"
+                m = folium.Map(location=start_loc, zoom_start=zoom, tiles=tiles, control_scale=True)
+                cluster = MarkerCluster().add_to(m)
+                argo_color = next((item["color"] for item in MAP_LEGEND_ITEMS if item["key"] == "argo"), "#3388ff")
+                for lat, lon in zip(ldf["latitude"].values, ldf["longitude"].values):
+                    folium.CircleMarker(
+                        location=[float(lat), float(lon)],
+                        radius=3,
+                        fill=True,
+                        fill_opacity=0.7,
+                        color=argo_color,
+                    ).add_to(cluster)
+
+                if HeatMap is not None and st.checkbox("Heatmap (approx)"):
+                    HeatMap(ldf[["latitude", "longitude"]].values.tolist(), radius=8).add_to(m)
+
+                # Live overlays
+                if show_noaa:
+                    noaa_color = next((item["color"] for item in MAP_LEGEND_ITEMS if item["key"] == "noaa"), "#facc15")
+                    noaa_df = load_noaa_buoys()
+                    for _, r in noaa_df.iterrows():
+                        folium.CircleMarker(
+                            location=[float(r["latitude"]), float(r["longitude"])],
+                            radius=4,
+                            color=noaa_color,
+                            fill=True,
+                            fill_opacity=0.9,
+                            popup=folium.Popup(f"NOAA: {r.get('name','')}", max_width=200),
+                        ).add_to(m)
+
+                if show_incois:
+                    incois_color = next((item["color"] for item in MAP_LEGEND_ITEMS if item["key"] == "incois"), "#22c55e")
+                    incois_df = load_incois_buoys()
+                    for _, r in incois_df.iterrows():
+                        txt = f"INCOIS: {r.get('station_id','')}"
+                        if "sst" in r and "wind_speed" in r:
+                            txt += f"<br>SST: {r['sst']} °C<br>Wind: {r['wind_speed']} m/s"
+                        folium.CircleMarker(
+                            location=[float(r["latitude"]), float(r["longitude"])],
+                            radius=5,
+                            color=incois_color,
+                            fill=True,
+                            fill_opacity=0.9,
+                            popup=folium.Popup(txt, max_width=220),
+                        ).add_to(m)
+
+                render_leaflet_map(m)
         else:
-            start_loc = INDIA_CENTER if focus_india and not world_view else (0, 0)
-            zoom = 5 if focus_india and not world_view else 2
+            st.info("No lat/lon columns to plot.")
 
-            tiles = "OpenStreetMap" if theme == "Light" else "CartoDB dark_matter"
-            m = folium.Map(location=start_loc, zoom_start=zoom, tiles=tiles, control_scale=True)
-            cluster = MarkerCluster().add_to(m)
-            for lat, lon in zip(ldf["latitude"].values, ldf["longitude"].values):
-                folium.CircleMarker(
-                    location=[float(lat), float(lon)],
-                    radius=3,
-                    fill=True,
-                    fill_opacity=0.7,
-                    color="#3388ff" if theme == "Light" else "#66aaff",
-                ).add_to(cluster)
-
-            if HeatMap is not None and st.checkbox("Heatmap (approx)"):
-                HeatMap(ldf[["latitude", "longitude"]].values.tolist(), radius=8).add_to(m)
-
-            # Live overlays
-            if show_noaa:
-                noaa_df = load_noaa_buoys()
-                for _, r in noaa_df.iterrows():
-                    folium.CircleMarker(
-                        location=[float(r["latitude"]), float(r["longitude"])],
-                        radius=4, color="#ffcc00", fill=True, fill_opacity=0.9,
-                        popup=folium.Popup(f"NOAA: {r.get('name','')}", max_width=200),
-                    ).add_to(m)
-
-            if show_incois:
-                incois_df = load_incois_buoys()
-                for _, r in incois_df.iterrows():
-                    txt = f"INCOIS: {r.get('station_id','')}"
-                    if "sst" in r and "wind_speed" in r:
-                        txt += f"<br>SST: {r['sst']} °C<br>Wind: {r['wind_speed']} m/s"
-                    folium.CircleMarker(
-                        location=[float(r["latitude"]), float(r["longitude"])],
-                        radius=5, color="#22aa44", fill=True, fill_opacity=0.9,
-                        popup=folium.Popup(txt, max_width=220),
-                    ).add_to(m)
-
-            render_leaflet_map(m)
-    else:
-        st.info("No lat/lon columns to plot.")
+    with legend_col:
+        render_map_legend(theme, show_noaa, show_incois)
 
 # -----------------------------
 # Cesium 3D Globe
