@@ -29,10 +29,18 @@ except Exception:
 try:
     import folium
     from folium.plugins import MarkerCluster, HeatMap
-    from streamlit_folium import st_folium
 except Exception:
     folium = None
-    st_folium = None
+    MarkerCluster = None
+    HeatMap = None
+
+# Lightweight geocoding (optional)
+try:
+    from geopy.geocoders import Nominatim
+    from geopy.extra.rate_limiter import RateLimiter
+except Exception:
+    Nominatim = None
+    RateLimiter = None
 
 # Live feeds
 import requests
@@ -215,6 +223,110 @@ THEME_PALETTES: Dict[str, Dict[str, str]] = {
         "accent_soft": "#1b2a46",
     },
 }
+
+PLACE_RADIUS_DEG = 2.5
+AGGREGATION_KEYWORDS: Dict[str, str] = {
+    "average": "mean",
+    "avg": "mean",
+    "mean": "mean",
+    "median": "median",
+    "max": "max",
+    "maximum": "max",
+    "min": "min",
+    "minimum": "min",
+    "count": "count",
+}
+
+
+@lru_cache(maxsize=1)
+def _get_geocoder():
+    if Nominatim is None:
+        return None
+    try:
+        geolocator = Nominatim(user_agent="floatchat-dashboard", timeout=10)
+        if RateLimiter is not None:
+            return RateLimiter(geolocator.geocode, min_delay_seconds=1)
+        return geolocator.geocode
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False)
+def geocode_place(name: str) -> Optional[Dict[str, Any]]:
+    """Return a bounding box + metadata for a named location."""
+
+    name = (name or "").strip()
+    if not name:
+        return None
+
+    geocode_fn = _get_geocoder()
+    if geocode_fn is not None:
+        try:
+            location = geocode_fn(name)
+        except Exception:
+            location = None
+        if location is not None:
+            try:
+                lat = float(location.latitude)
+                lon = float(location.longitude)
+                bbox = location.raw.get("boundingbox") if isinstance(location.raw, dict) else None
+            except Exception:
+                lat, lon, bbox = None, None, None
+            if lat is not None and lon is not None:
+                if bbox and len(bbox) == 4:
+                    lat_min, lat_max, lon_min, lon_max = map(float, bbox)
+                else:
+                    lat_min, lat_max = lat - PLACE_RADIUS_DEG, lat + PLACE_RADIUS_DEG
+                    lon_min, lon_max = lon - PLACE_RADIUS_DEG, lon + PLACE_RADIUS_DEG
+                return {
+                    "name": getattr(location, "address", None) or getattr(location, "raw", {}).get("display_name", name),
+                    "lat": lat,
+                    "lon": lon,
+                    "lat_range": (max(-90.0, lat_min), min(90.0, lat_max)),
+                    "lon_range": (max(-180.0, lon_min), min(180.0, lon_max)),
+                }
+
+    # Fallback to simple HTTP request (without geopy dependency)
+    try:
+        r = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": name, "format": "json", "limit": 1},
+            headers={"User-Agent": "floatchat-dashboard"},
+            timeout=10,
+        )
+        r.raise_for_status()
+        results = r.json()
+        if not results:
+            return None
+        result = results[0]
+        lat = float(result["lat"])
+        lon = float(result["lon"])
+        bbox = result.get("boundingbox")
+        if bbox and len(bbox) == 4:
+            lat_min, lat_max, lon_min, lon_max = map(float, bbox)
+        else:
+            lat_min, lat_max = lat - PLACE_RADIUS_DEG, lat + PLACE_RADIUS_DEG
+            lon_min, lon_max = lon - PLACE_RADIUS_DEG, lon + PLACE_RADIUS_DEG
+        return {
+            "name": result.get("display_name", name),
+            "lat": lat,
+            "lon": lon,
+            "lat_range": (max(-90.0, lat_min), min(90.0, lat_max)),
+            "lon_range": (max(-180.0, lon_min), min(180.0, lon_max)),
+        }
+    except Exception:
+        return None
+
+
+def render_leaflet_map(m: "folium.Map", height: int = 620) -> None:
+    """Render a folium map without triggering Streamlit reruns on interaction."""
+
+    try:
+        html = m.get_root().render()
+    except Exception:
+        st.warning("Unable to render Leaflet map.")
+        return
+    st.components.v1.html(html, height=height, scrolling=False)
 
 
 def _normalize_theme(value: Optional[str]) -> str:
@@ -437,6 +549,36 @@ def _extract_near_ranges(text: str) -> Tuple[Optional[Tuple[float, float]], Opti
     )
 
 
+PLACE_KEYWORDS = ("near", "around", "close to", "in", "at")
+
+
+def _extract_place_bbox(text: str) -> Optional[Tuple[Tuple[float, float], Tuple[float, float], str]]:
+    """Look for named places (e.g., 'near Mumbai') and geocode them."""
+
+    cleaned = text.lower()
+    for keyword in PLACE_KEYWORDS:
+        pattern = rf"{keyword}\s+([a-z][a-z\s]+)"
+        for match in re.finditer(pattern, cleaned, flags=re.IGNORECASE):
+            candidate = match.group(1)
+            candidate = re.split(r"[,.;]|\b(for|during|between|within|where|with|and|on|by|to|of|that|which|when)\b", candidate)[0]
+            candidate = candidate.strip().strip(",.;:")
+            if not candidate or any(char.isdigit() for char in candidate):
+                continue
+            if candidate.lower() in MONTH_NAME_TO_NUM:
+                continue
+            # Avoid generic words that are unlikely to be locations
+            if candidate.lower() in {"march", "april", "may", "week", "month", "year"}:
+                continue
+            place_info = geocode_place(candidate)
+            if place_info:
+                lat_range = place_info.get("lat_range")
+                lon_range = place_info.get("lon_range")
+                name = place_info.get("name", candidate.title())
+                if lat_range and lon_range:
+                    return lat_range, lon_range, name
+    return None
+
+
 def _extract_date_range(text: str) -> Optional[Tuple[pd.Timestamp, pd.Timestamp]]:
     """Parse relative or absolute date ranges."""
 
@@ -502,6 +644,16 @@ def llm_parse_query(query: str) -> Dict[str, Any]:
     if near_lon and "lon_range" not in filters:
         filters["lon_range"] = near_lon
 
+    place_bbox = _extract_place_bbox(lower)
+    if place_bbox:
+        lat_range, lon_range, place_name = place_bbox
+        if "lat_range" not in filters:
+            filters["lat_range"] = lat_range
+        if "lon_range" not in filters:
+            filters["lon_range"] = lon_range
+        filters["place_label"] = place_name
+        filters.setdefault("wants_map", True)
+
     lat_range = _extract_axis_range(lower, "lat")
     if lat_range:
         filters["lat_range"] = lat_range
@@ -522,6 +674,14 @@ def llm_parse_query(query: str) -> Dict[str, Any]:
     date_range = _extract_date_range(query)
     if date_range:
         filters["date_range"] = date_range
+
+    for keyword, agg in AGGREGATION_KEYWORDS.items():
+        if re.search(rf"\b{re.escape(keyword)}\b", lower):
+            filters["aggregation"] = agg
+            break
+
+    if any(token in lower for token in (" map", "show ", "plot", "where are", "near")):
+        filters.setdefault("wants_map", True)
 
     return filters
 
@@ -554,6 +714,9 @@ def apply_query_filters(df: pd.DataFrame, filters: Dict[str, Any]) -> Tuple[pd.D
                 start, end = end, start
             filtered = filtered[(filtered["date"] >= start) & (filtered["date"] <= end)]
             applied.append(f"date {start.date()} → {end.date()}")
+
+    if filters.get("place_label"):
+        applied.append(f"near {filters['place_label']}")
 
     return filtered, applied
 
@@ -609,6 +772,38 @@ def build_profile_figure(
     return fig, float_id
 
 
+def build_map_figure(
+    df: pd.DataFrame,
+    template: str,
+    map_style: Optional[str] = None,
+    max_points: int = 5000,
+) -> Optional[go.Figure]:
+    """Create a scatter map for chat responses."""
+
+    if not {"latitude", "longitude"}.issubset(df.columns):
+        return None
+
+    clean = df[["latitude", "longitude"]].dropna()
+    if clean.empty:
+        return None
+
+    sample = sampled(clean, min(max_points, len(clean)))
+    map_style = map_style or st.session_state.get("map_style", MAP_STYLES_LIGHT[0])
+    fig = px.scatter_map(
+        sample,
+        lat="latitude",
+        lon="longitude",
+        template=template,
+        height=420,
+    )
+    fig.update_layout(
+        map=dict(style=map_style),
+        mapbox=dict(style=map_style),
+        margin=dict(l=0, r=0, t=0, b=0),
+    )
+    return fig
+
+
 def run_query_pipeline(query: str, df: pd.DataFrame, template: str) -> Dict[str, Any]:
     """End-to-end pipeline used by the chat tab to answer queries."""
 
@@ -622,11 +817,46 @@ def run_query_pipeline(query: str, df: pd.DataFrame, template: str) -> Dict[str,
         "filtered_df": filtered_df,
         "row_count": row_count,
         "figure": None,
+        "map_figure": None,
         "float_id": None,
         "reply": "",
+        "aggregation": None,
     }
 
     variable = filters.get("variable")
+    aggregation = filters.get("aggregation")
+
+    if aggregation and row_count > 0:
+        if variable and variable in filtered_df.columns:
+            series = filtered_df[variable].dropna()
+            if not series.empty:
+                agg_value: Optional[float]
+                if aggregation == "count":
+                    agg_value = float(series.count())
+                else:
+                    try:
+                        agg_value = float(getattr(series, aggregation)())
+                    except Exception:
+                        agg_value = None
+
+                if agg_value is not None:
+                    result["aggregation"] = {
+                        "type": aggregation,
+                        "variable": variable,
+                        "value": agg_value,
+                    }
+                    summary = _summarize_filters(applied_filters)
+                    if aggregation == "count":
+                        value_text = f"{int(agg_value):,}"
+                    else:
+                        value_text = f"{agg_value:.3f}" if abs(agg_value) < 1000 else f"{agg_value:,.2f}"
+                    agg_label = aggregation.capitalize()
+                    result["reply"] = f"{agg_label} {variable.upper()} = {value_text}.\n{summary}".strip()
+        elif aggregation == "count":
+            result["aggregation"] = {"type": aggregation, "variable": None, "value": float(row_count)}
+            summary = _summarize_filters(applied_filters)
+            result["reply"] = f"Count = {row_count:,}.\n{summary}".strip()
+
     if variable and variable in filtered_df.columns and row_count > 0:
         figure, float_id = build_profile_figure(filtered_df, variable, template)
         if figure:
@@ -645,6 +875,11 @@ def run_query_pipeline(query: str, df: pd.DataFrame, template: str) -> Dict[str,
             result["reply"] = f"Found {row_count:,} matching rows.\n" + summary
         elif applied_filters:
             result["reply"] = "No rows matched the requested filters.\n" + summary
+
+    if filters.get("wants_map") and row_count > 0:
+        map_fig = build_map_figure(filtered_df, template)
+        if map_fig is not None:
+            result["map_figure"] = map_fig
 
     return result
 
@@ -1061,8 +1296,8 @@ with tab_plotly:
 # -----------------------------
 with tab_leaflet:
     st.subheader("🗺️ Leaflet (folium + clustering)")
-    if folium is None or st_folium is None:
-        st.warning("Install leaflet support:  pip install folium streamlit-folium")
+    if folium is None or MarkerCluster is None:
+        st.warning("Install leaflet support:  pip install folium")
     elif latlon_available and len(latlon_df) > 0:
         ldf = leaflet_points
         if ldf.empty:
@@ -1083,7 +1318,7 @@ with tab_leaflet:
                     color="#3388ff" if theme == "Light" else "#66aaff",
                 ).add_to(cluster)
 
-            if st.checkbox("Heatmap (approx)"):
+            if HeatMap is not None and st.checkbox("Heatmap (approx)"):
                 HeatMap(ldf[["latitude", "longitude"]].values.tolist(), radius=8).add_to(m)
 
             # Live overlays
@@ -1108,7 +1343,7 @@ with tab_leaflet:
                         popup=folium.Popup(txt, max_width=220),
                     ).add_to(m)
 
-            st_folium(m, height=620, width=None)
+            render_leaflet_map(m)
     else:
         st.info("No lat/lon columns to plot.")
 
@@ -1300,6 +1535,7 @@ with tab_chat:
 
         assistant_text = result.get("reply") or "I couldn't interpret that request with the available data."
         figure = result.get("figure")
+        map_figure = result.get("map_figure")
         fallback_text: Optional[str] = None
         show_no_match_notice = False
 
@@ -1320,6 +1556,9 @@ with tab_chat:
 
         if figure is not None:
             assistant_chat.plotly_chart(figure, use_container_width=True)
+
+        if map_figure is not None:
+            assistant_chat.plotly_chart(map_figure, use_container_width=True)
 
         if show_no_match_notice:
             warning_text = "⚠️ Sorry, no matching profiles in dataset."

@@ -1,7 +1,8 @@
 [
   "Show me salinity profiles near the equator in March 2023",
+  "Show me ARGO floats near Mumbai",
+  "Average PSAL of the ocean near Odisha in March 2023",
   "Compare BGC parameters in the Arabian Sea for the last 6 months",
-  "What are the nearest ARGO floats to this location?",
-  "Show me temperature profiles in the Indian Ocean",
+  "Plot floats around Lakshadweep on the map",
   "Give me salinity vs temperature comparison"
 ]

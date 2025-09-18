@@ -1,104 +1,77 @@
-# 🌊 FloatChat: AI-Powered Conversational Interface for ARGO Ocean Data Discovery and Visualization
+# 🌊 FloatChat — Conversational Explorer for ARGO Floats
 
-## 📘 Background
+FloatChat is a Streamlit dashboard that lets you explore ARGO float profiles with natural language. The current build focuses on a smooth judge-ready demo for Indian Ocean datasets, quick geospatial insights, and a chat assistant that understands place names and time windows.
 
-Oceanographic data is vast, complex, and heterogeneous — spanning satellite observations, CTD casts, Argo floats, and BGC sensors. The **Argo program** deploys autonomous profiling floats across the world’s oceans, generating rich datasets in **NetCDF** format that include temperature, salinity, and other essential ocean variables.
+## 🚀 Highlights (Current State)
 
-Accessing and interpreting this data traditionally requires domain expertise and technical proficiency. With the advent of **AI** and **Large Language Models (LLMs)**, it's now possible to build intuitive systems that democratize access to ocean data for researchers, policymakers, and curious minds alike.
+- **Map stability fix** – Leaflet maps now render as static components, so panning/zooming no longer forces the entire Streamlit app to reload.
+- **Named-place understanding** – Queries such as “show me floats near Mumbai” or “average PSAL near Odisha in March 2023” are geocoded via OpenStreetMap and translated into latitude/longitude filters automatically.
+- **On-demand summaries** – Ask for statistics like average/median/min/max/count for key variables (temperature, salinity, etc.) and see the result along with optional profile plots and maps.
+- **Live overlays** – Toggle NOAA buoy stations and INCOIS demo moorings on both Plotly and Leaflet maps.
+- **Hybrid chat fallback** – When the local dataset cannot satisfy a request, FloatChat surfaces web snippets and (if available) responds via a local Ollama model.
 
----
+## 🧪 Try These Queries
 
-## 💡 Project Overview
+Paste these into the chat tab to experience the new parsing logic:
 
-**FloatChat** is an AI-powered conversational system designed to simplify the exploration and visualization of ARGO float data using natural language. It bridges the gap between raw oceanographic data and actionable insights.
+- “Show me ARGO floats near Mumbai.”
+- “Average PSAL of the ocean near Odisha in March 2023.”
+- “Plot floats around Lakshadweep on the map.”
+- “Show me salinity profiles near the equator in March 2023.”
 
-### 🔧 Key Features
+## 📁 Project Layout
 
-- **NetCDF Ingestion**: Converts ARGO float data into structured formats (SQL/Parquet).
-- **Vector Database Integration**: Stores metadata and summaries using FAISS or Chroma for fast retrieval.
-- **LLM-Powered Querying**: Uses Retrieval-Augmented Generation (RAG) pipelines with multimodal models (GPT, QWEN, LLaMA, Mistral) via Model Context Protocol (MCP).
-- **Interactive Dashboards**: Built with Streamlit or Dash to visualize:
-  - Float trajectories
-  - Depth-time plots
-  - Profile comparisons
-- **Conversational Interface**: Chatbot-style UI that understands queries like:
-  - “Show me salinity profiles near the equator in March 2023”
-  - “Compare BGC parameters in the Arabian Sea for the last 6 months”
-  - “What are the nearest ARGO floats to this location?”
+```
+app/
+  dashboard.py          # Streamlit entry-point (charts, chat, maps)
+  example_queries.json  # Buttons rendered in the chat tab
+  converter.py          # Helper to convert NetCDF → Parquet
+scripts/                # Offline data ingestion utilities
+requirements.txt        # Python dependencies
+```
 
----
+## ⚙️ Getting Started
 
-## 🚀 Expected Solution Architecture
+1. **Install dependencies**
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. **Prepare data**
+   - Place Parquet files inside `data_cache/`. A sample `argo_index_indian.parquet` is expected by default.
+3. **Run the dashboard**
+   ```bash
+   streamlit run app/dashboard.py
+   ```
+4. **(Optional) Enable local LLM answers**
+   - Install [Ollama](https://ollama.com/) and pull a model such as `mistral`.
+   - Set `OLLAMA_MODEL` in `.env` if you want to override the default.
 
-| Component            | Description                                                                 |
-|---------------------|-----------------------------------------------------------------------------|
-| 🗂️ Data Pipeline     | Ingests NetCDF files → Converts to SQL/Parquet → Stores in PostgreSQL & FAISS |
-| 🧠 Backend LLM       | Translates user queries → SQL → Generates responses via RAG                  |
-| 📊 Visualization     | Dashboards with Plotly, Leaflet, or Cesium for geospatial and tabular views |
-| 💬 Chat Interface    | Natural language interaction for guided data discovery                      |
-| 🌍 PoC Deployment    | Demonstrates functionality using Indian Ocean ARGO data                      |
+## 🧠 How Natural-Language Queries Work Now
 
----
+1. We normalise aliases for temperature, salinity, dissolved oxygen, etc.
+2. The parser looks for:
+   - Named places (`near Mumbai`, `in Bay of Bengal`) → geocoded to bounding boxes.
+   - Explicit latitude/longitude ranges.
+   - Temporal windows (`March 2023`, `last 6 months`).
+   - Statistical intents (`average`, `median`, `count`, ...).
+3. Filters are applied to the cached Parquet frame. Results fan out to:
+   - Profile plots when depth variables are available.
+   - Scatter maps with sampled points.
+   - Aggregated statistics summarised in plain English.
+4. If no data matches, a hybrid fallback (DuckDuckGo search + Ollama) is used.
 
-## 🧪 Proof-of-Concept Goals
+## 🔍 Known Limitations & Future Scope
 
-- ✅ End-to-end ingestion and transformation of ARGO NetCDF data
-- ✅ Conversational querying with LLMs and vector search
-- ✅ Interactive geospatial and profile visualizations
-- ✅ Extensibility to BGC floats, gliders, buoys, and satellite datasets
-
----
-
-## 🔤 Acronyms
-
-| Term     | Meaning                                      |
-|----------|----------------------------------------------|
-| NetCDF   | Network Common Data Format                   |
-| CTD      | Conductivity, Temperature, and Depth         |
-| BGC      | Bio-Geo-Chemical Floats                      |
-| RAG      | Retrieval-Augmented Generation               |
-| MCP      | Model Context Protocol                       |
-
----
-
-## 📎 License
-
-This project is released under the MIT License. See `LICENSE` for details.
-
----
+- **Vector / SQL backends** – The original roadmap mentioned FAISS/Chroma and SQL translation. The current build operates on cached Parquet files only. Future work: plug in a vector index for semantic retrieval, plus SQL generation for large catalogues.
+- **Richer analytics** – Only single-variable aggregates are supported right now. Expanding to anomalies, trends, and multi-variable comparisons would add depth.
+- **Offline geocoding cache** – We rely on live OpenStreetMap geocoding. Shipping a small cache (or offline gazetteer) would make demos more resilient.
+- **Data freshness** – Live NOAA/INCOIS layers are demo endpoints. Integrating authenticated feeds or additional regional datasets is on the backlog.
+- **Model integration** – Remote GPT-style models and MCP connectors are not wired in yet; today’s assistant targets local Ollama deployments.
 
 ## 🤝 Contributing
 
-We welcome contributions! Please open issues or submit pull requests to improve functionality, add new visualizations, or expand dataset support.
+Issues and pull requests are welcome! Please lint/format your code and document new data dependencies in `requirements.txt` and this README.
 
----
+## 📄 License
 
-## 📬 Contact
-
-For questions, collaborations, or feedback, reach out via [GitHub Issues](https://github.com/your-repo/issues) or email the maintainers.
-
-## 📅 Project Timeline
-
-### 🟢 FloatChat – Day 1: Data Ingestion & Setup
-
-**🎯 Goal**  
-Prepare real ARGO float data in a **structured, analysis-ready format** to use for chat-driven exploration and visualization in later days.
-
-**✅ Steps Completed**
-- Pulled subset of ARGO float profiles from **Ifremer ERDDAP** (`ArgoFloats`, `ArgoFloats-index`)
-- Extracted key fields: `time`, `latitude`, `longitude`, `platform_number`, `pres`, `temp`, `psal`
-- Saved data as **Parquet** in `data_cache/` for fast local access
-- Added optional ingestion of **NetCDF** files into Parquet format
-
-**🛠️ Scripts Used**
-- `fetch_argo_erddap.py` → Downloads profile data
-- `fetch_index.py` → Downloads lightweight metadata index
-- `ingest_local_netcdf.py` → Converts local NetCDF → Parquet
-- `check_cache.py` → Sanity check for saved datasets
-
-**🔜 Next Steps (Day 2 Preview)**
-- Build basic visualizations using cached data:
-  - 🌍 Map of float locations
-  - 📈 Depth vs temperature/salinity plots
-
----
+MIT — see [`LICENSE`](LICENSE).
