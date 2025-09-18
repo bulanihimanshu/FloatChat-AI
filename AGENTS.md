@@ -1,103 +1,51 @@
-# 🌊 FloatChat — AGENTS.md
+# 🌊 FloatChat — Project Agents & Roadmap Snapshot
 
-This document explains the **agents (functional modules)** in the FloatChat project and their roles in the pipeline.
+This document summarises the modules that power the Streamlit dashboard and highlights new additions introduced in this iteration.
 
----
+## 🔹 Data Agent
+- Loads cached ARGO Parquet files from `data_cache/`.
+- Normalises column names (`time`, `date`, `latitude`, `longitude`, `temp`, `psal`, `pres`).
+- Downcasts numeric columns for memory efficiency.
 
-## 🔹 1. Data Agent
-**Role:** Ingests and prepares ARGO data.  
-**Tasks:**
-- Read ARGO NetCDF datasets.  
-- Normalize column names (`time`, `latitude`, `longitude`, `temp`, `psal`, `pres`).  
-- Convert raw NetCDF → **Parquet** for efficient access.  
-- Cache data to improve performance.  
+### Future scope
+- Support incremental refresh of the cache from ERDDAP/FTP without manual scripts.
+- Offer a plug-in layer for alternative storage (DuckDB, Postgres) once datasets grow.
 
-**Input:** NetCDF files.  
-**Output:** Parquet DataFrames in `data_cache/`.  
+## 🔹 Filter Agent
+- Applies geospatial, temporal, and sampling filters.
+- Understands **named places** via OpenStreetMap geocoding (e.g., “near Mumbai”).
+- Detects statistical intents (`average`, `median`, `count`, …) from chat queries.
 
----
+### Future scope
+- Expand to multi-variable comparisons (e.g., “difference between temp and psal”).
+- Allow polygon uploads or EEZ presets beyond bounding boxes.
 
-## 🔹 2. Filter Agent
-**Role:** Applies filters on data for user queries.  
-**Tasks:**
-- Geospatial subsetting (Indian Ocean vs world view).  
-- Date range filtering.  
-- Random sampling for faster plots.  
+## 🔹 Visualisation Agent
+- Plotly scatter maps with optional NOAA/INCOIS overlays.
+- Leaflet map rendered as a static component to stop unwanted Streamlit reloads.
+- Cesium 3D globe, TS diagrams, and profile plots.
 
-**Input:** Full DataFrame.  
-**Output:** Filtered DataFrame.  
+### Future scope
+- Persist user-selected map styles & camera views per session.
+- Add anomaly layers (e.g., climatology deviations) when data becomes available.
 
----
+## 🔹 Chat Agent
+- Parses free-form queries, applies filters, and returns:
+  - Aggregated statistics.
+  - Optional profile or map plots.
+- Falls back to DuckDuckGo + local Ollama when data filters return no rows.
 
-## 🔹 3. Visualization Agent
-**Role:** Creates interactive dashboards.  
-**Tasks:**
-- **Plotly Maps** — scatter maps with ARGO floats.  
-- **Leaflet Maps** — fast clustering, heatmaps.  
-- **Cesium Globe** — 3D interactive globe.  
-- **Profiles** — temperature vs depth, salinity vs depth, T–S diagrams, mean vertical sections.  
-- **Tabular View** — previews data with paging.  
-- **Export** — CSV, Excel, Parquet, NetCDF.  
+### Future scope
+- Integrate hosted LLMs and retrieval pipelines (FAISS/Chroma) for richer answers.
+- Provide streaming responses and source citation for hybrid answers.
 
-**Input:** Filtered DataFrame.  
-**Output:** Interactive visualizations.  
+## 🔹 Integration Agent
+- Streamlit `dashboard.py` orchestrates sidebar controls, caching, and tab layout.
+- Example queries in `example_queries.json` showcase named-place and aggregation requests.
 
----
-
-## 🔹 4. Chat Agent
-**Role:** Conversational interface for ARGO queries.  
-**Tasks:**
-- Parse queries (`llm_parse_query`).  
-- If dataset fields match → filter & plot results.  
-- If no data available → **Hybrid Fallback**:  
-  - DuckDuckGo search for snippets.  
-  - Local LLaMA/Mistral via Ollama for reasoning.  
-- Render chat history with Streamlit.  
-- Show **example queries** from `example_queries.json`.  
-
-**Input:** User queries.  
-**Output:** Plots or AI-generated answers.  
+### Future scope
+- Persist lightweight session summaries for exporting chat transcripts.
+- Add health checks for external services (Ollama, geocoding) with graceful UI notices.
 
 ---
-
-## 🔹 5. Integration Agent
-**Role:** Orchestrates all modules into the Streamlit app.  
-**Tasks:**
-- Manage **sidebar controls** (theme, filters, map styles).  
-- Coordinate data → filter → viz → chat flow.  
-- Handle caching, session state, and layout.  
-- Provide **Final Judge-Ready Demo** via `dashboard.py`.  
-    - Demo should include: seamless navigation, example queries, interactive maps, live data overlays, and clear instructions for judges.
-
----
-
-## 🔹 6. External Data Agents (Live Layers)
-**Role:** Fetch and overlay live external datasets.  
-**Tasks:**
-- Fetch **NOAA buoy data** (stations, locations).  
-- Fetch **INCOIS demo mooring stations**.  
-- Overlay stations on maps (Plotly + Leaflet).  
-
-**Input:** External APIs.  
-**Output:** Live layers on dashboard.  
-
----
-
-## 🔹 Workflow
-
-<details>
-<summary>Mermaid source (for editing):</summary>
-
-```mermaid
-flowchart TD
-    A[User Query] --> B[Chat Agent]
-    B -->|If ARGO data available| C[Filter Agent]
-    C --> D[Visualization Agent]
-    D --> E[Dashboard Output]
-
-```
-🔹 Notes
-
-    Agents are modular and can be extended with other oceanographic datasets (gliders, moorings, satellites).
-
-    Judges can test both data-driven plots and knowledge-driven answers.
+**Reminder:** Run Streamlit via `streamlit run app/dashboard.py` for the complete experience.
