@@ -47,6 +47,11 @@ import requests
 
 # Local LLM + Web Search
 from ddgs import DDGS
+
+LLM_SYSTEM_PROMPT = (
+    "You are FloatChat, an assistant that analyses the in-app ARGO float dataset and "
+    "keeps responses focused on oceanography insights relevant to the FloatChat project."
+)
 def web_search(query: str, num_results: int = 3) -> str:
     """Fetch snippets from DuckDuckGo search (no API key needed)."""
     try:
@@ -91,7 +96,7 @@ def ollama_answer(
             response = _ollama_client.chat(
                 model=model,
                 messages=[
-                    {"role": "system", "content": "You are an expert assistant on oceans and ARGO data."},
+                    {"role": "system", "content": LLM_SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
                 ],
                 stream=False,
@@ -110,7 +115,7 @@ def ollama_answer(
                 "model": model,
                 "stream": False,
                 "messages": [
-                    {"role": "system", "content": "You are an expert assistant on oceans and ARGO data."},
+                    {"role": "system", "content": LLM_SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
                 ],
             },
@@ -136,9 +141,12 @@ def hybrid_fallback_answer(query: str) -> str:
             answer_parts.append(answer)
 
     if context:
-        answer_parts.append("🔎 Web snippets:\n" + context)
+        answer_parts.append("🔎 FloatChat external context:\n" + context)
 
     if answer_parts:
+        answer_parts.append(
+            "🤖 FloatChat note: I'll prioritise answers grounded in our cached ARGO floats whenever data matches your filters."
+        )
         return "\n\n".join(answer_parts)
 
     return "⚠️ Unable to fetch an AI answer right now."
@@ -251,6 +259,29 @@ def _get_geocoder():
         return None
 
 
+def _ensure_min_span(
+    bounds: Tuple[float, float],
+    min_span: float,
+    hard_limits: Tuple[float, float],
+) -> Tuple[float, float]:
+    """Expand a (min, max) range to at least `min_span` degrees."""
+
+    lower, upper = bounds
+    lower, upper = sorted((float(lower), float(upper)))
+    if min_span <= 0:
+        return (max(hard_limits[0], lower), min(hard_limits[1], upper))
+
+    span = upper - lower
+    if span >= min_span:
+        return (max(hard_limits[0], lower), min(hard_limits[1], upper))
+
+    center = (upper + lower) / 2.0
+    half_span = min_span / 2.0
+    expanded_lower = max(hard_limits[0], center - half_span)
+    expanded_upper = min(hard_limits[1], center + half_span)
+    return (expanded_lower, expanded_upper)
+
+
 @st.cache_data(show_spinner=False)
 def geocode_place(name: str) -> Optional[Dict[str, Any]]:
     """Return a bounding box + metadata for a named location."""
@@ -278,12 +309,18 @@ def geocode_place(name: str) -> Optional[Dict[str, Any]]:
                 else:
                     lat_min, lat_max = lat - PLACE_RADIUS_DEG, lat + PLACE_RADIUS_DEG
                     lon_min, lon_max = lon - PLACE_RADIUS_DEG, lon + PLACE_RADIUS_DEG
+                lat_range = _ensure_min_span(
+                    (lat_min, lat_max), PLACE_RADIUS_DEG * 2, (-90.0, 90.0)
+                )
+                lon_range = _ensure_min_span(
+                    (lon_min, lon_max), PLACE_RADIUS_DEG * 2, (-180.0, 180.0)
+                )
                 return {
                     "name": getattr(location, "address", None) or getattr(location, "raw", {}).get("display_name", name),
                     "lat": lat,
                     "lon": lon,
-                    "lat_range": (max(-90.0, lat_min), min(90.0, lat_max)),
-                    "lon_range": (max(-180.0, lon_min), min(180.0, lon_max)),
+                    "lat_range": lat_range,
+                    "lon_range": lon_range,
                 }
 
     # Fallback to simple HTTP request (without geopy dependency)
@@ -307,12 +344,18 @@ def geocode_place(name: str) -> Optional[Dict[str, Any]]:
         else:
             lat_min, lat_max = lat - PLACE_RADIUS_DEG, lat + PLACE_RADIUS_DEG
             lon_min, lon_max = lon - PLACE_RADIUS_DEG, lon + PLACE_RADIUS_DEG
+        lat_range = _ensure_min_span(
+            (lat_min, lat_max), PLACE_RADIUS_DEG * 2, (-90.0, 90.0)
+        )
+        lon_range = _ensure_min_span(
+            (lon_min, lon_max), PLACE_RADIUS_DEG * 2, (-180.0, 180.0)
+        )
         return {
             "name": result.get("display_name", name),
             "lat": lat,
             "lon": lon,
-            "lat_range": (max(-90.0, lat_min), min(90.0, lat_max)),
-            "lon_range": (max(-180.0, lon_min), min(180.0, lon_max)),
+            "lat_range": lat_range,
+            "lon_range": lon_range,
         }
     except Exception:
         return None
@@ -772,6 +815,36 @@ def build_profile_figure(
     return fig, float_id
 
 
+def _infer_map_view(df: pd.DataFrame) -> Tuple[Dict[str, float], float]:
+    """Return a reasonable map center + zoom for the sample points."""
+
+    lat_min = float(df["latitude"].min())
+    lat_max = float(df["latitude"].max())
+    lon_min = float(df["longitude"].min())
+    lon_max = float(df["longitude"].max())
+
+    center = {
+        "lat": (lat_min + lat_max) / 2.0,
+        "lon": (lon_min + lon_max) / 2.0,
+    }
+
+    span = max(lat_max - lat_min, lon_max - lon_min)
+    if span <= 0.25:
+        zoom = 9
+    elif span <= 1:
+        zoom = 7
+    elif span <= 3:
+        zoom = 5
+    elif span <= 8:
+        zoom = 4
+    elif span <= 20:
+        zoom = 3
+    else:
+        zoom = 1.5
+
+    return center, zoom
+
+
 def build_map_figure(
     df: pd.DataFrame,
     template: str,
@@ -783,22 +856,31 @@ def build_map_figure(
     if not {"latitude", "longitude"}.issubset(df.columns):
         return None
 
-    clean = df[["latitude", "longitude"]].dropna()
+    clean = df.dropna(subset=["latitude", "longitude"])
     if clean.empty:
         return None
 
     sample = sampled(clean, min(max_points, len(clean)))
     map_style = map_style or st.session_state.get("map_style", MAP_STYLES_LIGHT[0])
-    fig = px.scatter_map(
+
+    hover_fields = [
+        c
+        for c in ("platform_number", "date", "temp", "psal", "pres")
+        if c in sample.columns
+    ]
+    fig = px.scatter_mapbox(
         sample,
         lat="latitude",
         lon="longitude",
+        hover_data=hover_fields if hover_fields else None,
         template=template,
         height=420,
+        zoom=2,
     )
+
+    center, zoom = _infer_map_view(sample)
     fig.update_layout(
-        map=dict(style=map_style),
-        mapbox=dict(style=map_style),
+        mapbox=dict(style=map_style, center=center, zoom=zoom),
         margin=dict(l=0, r=0, t=0, b=0),
     )
     return fig
