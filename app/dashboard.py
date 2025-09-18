@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 from typing import Any, Dict, List, Optional, Tuple
 import json
+import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.express as px
@@ -255,6 +256,10 @@ MAP_LEGEND_ITEMS: Tuple[Dict[str, str], ...] = (
 )
 
 PLACE_RADIUS_DEG = 2.5
+VARIABLE_CATALOG: Dict[str, Tuple[str, str, str]] = {
+    "🌡️ Temperature": ("temp", "Temperature (°C)", "°C"),
+    "🧂 Salinity": ("psal", "Salinity (PSU)", "PSU"),
+}
 AGGREGATION_KEYWORDS: Dict[str, str] = {
     "average": "mean",
     "avg": "mean",
@@ -1166,6 +1171,117 @@ def _profile_statistics(df: pd.DataFrame) -> Dict[str, pd.Series]:
         "std_sal": std_s,
     }
 
+
+def _infer_profile_axis(df: pd.DataFrame) -> Tuple[pd.Series, pd.Series]:
+    """Return label + numeric order series representing profile progression."""
+
+    def _as_float(series: pd.Series) -> pd.Series:
+        try:
+            numeric = pd.to_numeric(series, errors="coerce")
+            if numeric.notna().any():
+                return numeric.astype(float)
+        except Exception:
+            pass
+        return pd.Series(np.nan, index=series.index, dtype=float)
+
+    candidates = (
+        "cycle_number",
+        "cycle",
+        "profile_number",
+        "profile",
+        "n_cycle",
+        "n_prof",
+        "profile_id",
+    )
+    for cand in candidates:
+        if cand in df.columns:
+            series = df[cand]
+            if series.dropna().empty:
+                continue
+            labels = series.astype(str)
+            order = _as_float(series)
+            if order.isna().all():
+                order = pd.Series(pd.factorize(labels)[0], index=labels.index, dtype=float)
+            return labels, order
+
+    for temporal_col, fmt in (("date", "%Y-%m-%d"), ("time", "%Y-%m-%d %H:%M")):
+        if temporal_col in df.columns:
+            dt = pd.to_datetime(df[temporal_col], errors="coerce")
+            if dt.notna().any():
+                labels = dt.dt.strftime(fmt)
+                order = dt.map(lambda x: x.toordinal() if pd.notna(x) else np.nan).astype(float)
+                return labels, order
+
+    fallback = pd.Series(pd.RangeIndex(len(df)), index=df.index)
+    labels = fallback.astype(str)
+    order = fallback.astype(float)
+    return labels, order
+
+
+def _prepare_hovmoller_matrix(df: pd.DataFrame, variable: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """Return pivoted depth x profile matrix and summary metadata."""
+
+    required_cols = {"pres", variable}
+    if not required_cols.issubset(df.columns):
+        return pd.DataFrame(), {}
+
+    subset = df.dropna(subset=list(required_cols)).copy()
+    if subset.empty:
+        return pd.DataFrame(), {}
+
+    labels, order = _infer_profile_axis(subset)
+    subset["_profile_label"] = labels
+    subset["_profile_order"] = order
+
+    # Smooth depth resolution to manageable number of bands
+    subset["_depth_bin"] = subset["pres"].astype(float).round(0)
+
+    pivot = subset.pivot_table(
+        index="_depth_bin",
+        columns="_profile_label",
+        values=variable,
+        aggfunc="mean",
+        sort=False,
+    )
+    if pivot.empty:
+        return pd.DataFrame(), {}
+
+    order_frame = (
+        subset[["_profile_label", "_profile_order"]]
+        .dropna(subset=["_profile_label"])
+        .drop_duplicates()
+        .sort_values("_profile_order")
+    )
+    ordered_labels = order_frame["_profile_label"].tolist()
+    if ordered_labels:
+        pivot = pivot.reindex(ordered_labels, axis=1)
+
+    pivot.sort_index(inplace=True)
+
+    values = pivot.to_numpy(dtype=float)
+    metadata = {
+        "profiles": len(pivot.columns),
+        "depth_levels": len(pivot.index),
+        "min_value": float(np.nanmin(values)) if np.isfinite(np.nanmin(values)) else None,
+        "max_value": float(np.nanmax(values)) if np.isfinite(np.nanmax(values)) else None,
+        "labels": ordered_labels if ordered_labels else list(pivot.columns.astype(str)),
+    }
+    return pivot, metadata
+
+
+def _prepare_profile_series(df: pd.DataFrame, variable: str) -> pd.Series:
+    if not {"pres", variable}.issubset(df.columns):
+        return pd.Series(dtype=float)
+
+    subset = df.dropna(subset=["pres", variable]).copy()
+    if subset.empty:
+        return pd.Series(dtype=float)
+
+    subset["_depth_bin"] = subset["pres"].astype(float).round(0)
+    series = subset.groupby("_depth_bin")[variable].mean().sort_index()
+    series.index.name = "Depth (m)"
+    return series
+
 # -----------------------------
 # Live Data (cached)
 # -----------------------------
@@ -1425,8 +1541,18 @@ profile_stats = _profile_statistics(profile_core) if not profile_core.empty else
 # -----------------------------
 # Tabs
 # -----------------------------
-tab_plotly, tab_leaflet, tab_cesium, tab_profiles, tab_table, tab_export, tab_chat = st.tabs(
-    ["🗺️ Plotly Map", "🗺️ Leaflet (fast)", "🌐 Cesium 3D", "🌊 Profiles", "📑 Table", "💾 Export", "💬 Chat"]
+tab_plotly, tab_leaflet, tab_cesium, tab_profiles, tab_hovmoller, tab_compare, tab_table, tab_export, tab_chat = st.tabs(
+    [
+        "🗺️ Plotly Map",
+        "🗺️ Leaflet (fast)",
+        "🌐 Cesium 3D",
+        "🌊 Profiles",
+        "📊 Hovmöller",
+        "🔀 Float Comparison",
+        "📑 Table",
+        "💾 Export",
+        "💬 Chat",
+    ]
 )
 
 # -----------------------------
@@ -1697,6 +1823,351 @@ with tab_profiles:
         st.info("ℹ️ This dataset has no profile data. "
                 "Please load a raw ARGO profile parquet "
                 "(e.g., *_prof.parquet) to see TS diagrams and vertical profiles.")
+
+# -----------------------------
+# Hovmöller analysis
+# -----------------------------
+with tab_hovmoller:
+    st.subheader("📊 Hovmöller Analysis")
+
+    if not profile_cols_available or "platform_number" not in df.columns:
+        st.info(
+            "Hovmöller diagrams need vertical profile data with identifiable floats. "
+            "Load an ARGO profile dataset to explore temporal-depth variability."
+        )
+    else:
+        float_options = sorted(df["platform_number"].dropna().astype(str).unique().tolist())
+        available_variables = {
+            label: meta
+            for label, meta in VARIABLE_CATALOG.items()
+            if meta[0] in df.columns
+        }
+
+        if not float_options:
+            st.info("No floats available after filtering. Adjust filters to see profiles.")
+        elif not available_variables:
+            st.info("No compatible variables available for Hovmöller analysis in this dataset.")
+        else:
+            controls_col, stats_col = st.columns((2, 1))
+            with controls_col:
+                selected_float = st.selectbox(
+                    "Select Float",
+                    options=float_options,
+                    format_func=lambda x: f"{x}",
+                    key="hovmoller_float",
+                )
+                variable_label = st.radio(
+                    "Variable Analysis",
+                    options=list(available_variables.keys()),
+                    horizontal=True,
+                    key="hovmoller_variable",
+                )
+                st.markdown("### ℹ️ About Hovmöller")
+                st.write(
+                    "A Hovmöller diagram shows how a variable changes over time and depth, "
+                    "providing insights into temporal patterns in the water column."
+                )
+                st.write(
+                    "💡 Look for patterns like seasonal thermoclines, mixing events, or water mass changes."
+                )
+
+            variable_key, variable_title, variable_units = available_variables[variable_label]
+            float_subset = df[df["platform_number"].astype(str) == str(selected_float)]
+            hov_matrix, hov_meta = _prepare_hovmoller_matrix(float_subset, variable_key)
+
+            def _first_available(colnames: Tuple[str, ...]) -> str:
+                for col in colnames:
+                    if col in float_subset.columns:
+                        values = float_subset[col].dropna().astype(str)
+                        if not values.empty:
+                            return values.iloc[0]
+                return "—"
+
+            institution = _first_available(("institution", "institution_name", "data_centre", "dac"))
+            total_cycles: Optional[int] = None
+            for cand in ("cycle_number", "cycle", "profile_number", "profile", "n_cycle", "n_prof"):
+                if cand in float_subset.columns:
+                    unique_vals = float_subset[cand].dropna().unique()
+                    if len(unique_vals) > 0:
+                        total_cycles = len(unique_vals)
+                        break
+            if total_cycles is None and hov_meta.get("profiles"):
+                total_cycles = hov_meta.get("profiles")
+
+            depth_levels = hov_meta.get("depth_levels") or 0
+            min_value = hov_meta.get("min_value")
+            max_value = hov_meta.get("max_value")
+            if min_value is not None and max_value is not None:
+                value_range_text = f"{min_value:.2f} – {max_value:.2f} {variable_units}"
+            else:
+                value_range_text = "—"
+
+            with stats_col:
+                st.markdown("### 📊 Float Statistics")
+                st.markdown(f"**Float ID:** {selected_float}")
+                st.markdown(f"**Institution:** {institution}")
+                metrics = st.columns(3)
+                metrics[0].metric("Total Cycles", total_cycles if total_cycles is not None else "—")
+                metrics[1].metric("Depth Levels", depth_levels if depth_levels else "—")
+                metrics[2].metric("Value Range", value_range_text)
+
+            if hov_matrix.empty:
+                st.warning("Not enough data to render the Hovmöller diagram for this selection.")
+            else:
+                hov_labels = [str(label) for label in hov_matrix.columns]
+                fig_hov = go.Figure(
+                    data=go.Heatmap(
+                        x=hov_labels,
+                        y=hov_matrix.index.astype(float),
+                        z=hov_matrix.to_numpy(),
+                        colorscale="Viridis",
+                        colorbar=dict(title=variable_title),
+                    )
+                )
+                fig_hov.update_layout(
+                    template=plotly_template,
+                    title=f"Hovmöller Diagram – {variable_title}",
+                    xaxis_title="Profile progression",
+                    yaxis_title="Depth (m)",
+                )
+                fig_hov.update_yaxes(autorange="reversed")
+
+                st.markdown("### Hovmöller Diagram")
+                st.plotly_chart(fig_hov, use_container_width=True)
+                st.caption(f"{hov_meta.get('profiles', 0)} time steps")
+
+                hov_values = hov_matrix.to_numpy(dtype=float)
+                serialisable_values = [
+                    [None if (val is None or np.isnan(val)) else float(val) for val in row]
+                    for row in hov_values
+                ]
+
+                export_payload = json.dumps(
+                    {
+                        "float": selected_float,
+                        "variable": variable_key,
+                        "variable_title": variable_title,
+                        "units": variable_units,
+                        "metadata": hov_meta,
+                        "matrix": {
+                            "depth": hov_matrix.index.astype(float).tolist(),
+                            "profiles": hov_labels,
+                            "values": serialisable_values,
+                        },
+                    },
+                    indent=2,
+                ).encode("utf-8")
+
+                st.download_button(
+                    "📤 Export Diagram",
+                    data=export_payload,
+                    file_name=f"hovmoller_{selected_float}_{variable_key}.json",
+                    mime="application/json",
+                )
+
+                st.markdown("#### Axis Guide")
+                st.markdown(
+                    "**Time Axis (Horizontal)** – Profile cycle numbers representing time progression of measurements."
+                )
+                st.markdown(
+                    "**Depth Axis (Vertical)** – Ocean depth in meters, from surface (0 m) to deeper observations."
+                )
+
+# -----------------------------
+# Float comparison
+# -----------------------------
+with tab_compare:
+    st.subheader("🔀 Float Comparison")
+
+    if not profile_cols_available or "platform_number" not in df.columns:
+        st.info("Float comparison requires temperature or salinity profiles with depth metadata.")
+    else:
+        float_options = sorted(df["platform_number"].dropna().astype(str).unique().tolist())
+        available_variables = {
+            label: meta
+            for label, meta in VARIABLE_CATALOG.items()
+            if meta[0] in df.columns
+        }
+
+        if len(float_options) < 2:
+            st.info("Select a dataset with at least two floats to compare their profiles.")
+        elif not available_variables:
+            st.info("No comparable variables available for the current dataset.")
+        else:
+            select_cols = st.columns(2)
+            with select_cols[0]:
+                first_float = st.selectbox(
+                    "First Float",
+                    options=float_options,
+                    key="compare_float_a",
+                )
+            with select_cols[1]:
+                second_float = st.selectbox(
+                    "Second Float",
+                    options=float_options,
+                    index=1 if len(float_options) > 1 else 0,
+                    key="compare_float_b",
+                )
+
+            variable_label = st.radio(
+                "Analysis Type",
+                options=list(available_variables.keys()),
+                horizontal=True,
+                key="compare_variable",
+            )
+
+            if str(first_float) == str(second_float):
+                st.warning("Choose two different floats to run a comparison.")
+            else:
+                variable_key, variable_title, variable_units = available_variables[variable_label]
+
+                subset_a = df[df["platform_number"].astype(str) == str(first_float)]
+                subset_b = df[df["platform_number"].astype(str) == str(second_float)]
+
+                def _label_with_institution(float_id: str, frame: pd.DataFrame) -> str:
+                    inst = ""
+                    for col in ("institution", "institution_name", "data_centre", "dac"):
+                        if col in frame.columns:
+                            values = frame[col].dropna().astype(str)
+                            if not values.empty:
+                                inst = values.iloc[0]
+                                break
+                    return f"{float_id} – {inst}" if inst else str(float_id)
+
+                label_a = _label_with_institution(first_float, subset_a)
+                label_b = _label_with_institution(second_float, subset_b)
+
+                series_a = _prepare_profile_series(subset_a, variable_key)
+                series_b = _prepare_profile_series(subset_b, variable_key)
+
+                common_depths = sorted(set(series_a.index).intersection(series_b.index))
+                comparison = pd.DataFrame(
+                    {
+                        label_a: series_a.reindex(common_depths),
+                        label_b: series_b.reindex(common_depths),
+                    },
+                    index=common_depths,
+                ).dropna()
+                comparison.index.name = "Depth (m)"
+
+                if comparison.empty:
+                    st.warning("Not enough overlapping depth levels to compare these floats.")
+                else:
+                    st.markdown("### 🤖 AI Insights")
+                    st.write(
+                        f"Comparing {variable_title} using profiles method between floats A and B."
+                    )
+
+                    diff_series = comparison[label_a] - comparison[label_b]
+                    data_points = len(comparison)
+                    avg_diff = diff_series.abs().mean()
+                    max_diff = diff_series.abs().max()
+
+                    summary_cols = st.columns(3)
+                    summary_cols[0].metric("Data Points", data_points)
+                    summary_cols[1].metric("Avg Difference", f"{avg_diff:.2f} {variable_units}")
+                    summary_cols[2].metric("Max Difference", f"{max_diff:.2f} {variable_units}")
+
+                    st.download_button(
+                        "📤 Export Comparison",
+                        data=json.dumps(
+                            {
+                                "variable": variable_key,
+                                "variable_title": variable_title,
+                                "units": variable_units,
+                                "float_a": label_a,
+                                "float_b": label_b,
+                                "data_points": data_points,
+                                "profile": comparison.reset_index().to_dict(orient="list"),
+                            },
+                            indent=2,
+                        ).encode("utf-8"),
+                        file_name=f"comparison_{first_float}_{second_float}_{variable_key}.json",
+                        mime="application/json",
+                    )
+
+                    st.markdown("### Comparison Visualization")
+                    fig_compare = go.Figure()
+                    fig_compare.add_trace(
+                        go.Scatter(
+                            x=comparison[label_a],
+                            y=comparison.index.astype(float),
+                            mode="lines+markers",
+                            name=label_a,
+                        )
+                    )
+                    fig_compare.add_trace(
+                        go.Scatter(
+                            x=comparison[label_b],
+                            y=comparison.index.astype(float),
+                            mode="lines+markers",
+                            name=label_b,
+                        )
+                    )
+                    fig_compare.update_layout(
+                        template=plotly_template,
+                        xaxis_title=f"{variable_title}",
+                        yaxis_title="Depth (m)",
+                    )
+                    fig_compare.update_yaxes(autorange="reversed")
+                    st.plotly_chart(fig_compare, use_container_width=True)
+
+                    stats_col, diff_col = st.columns(2)
+                    with stats_col:
+                        st.markdown("#### Statistical Comparison")
+                        categories = ["Mean", "Max", "Min", "Range"]
+                        stats_a = [
+                            comparison[label_a].mean(),
+                            comparison[label_a].max(),
+                            comparison[label_a].min(),
+                            comparison[label_a].max() - comparison[label_a].min(),
+                        ]
+                        stats_b = [
+                            comparison[label_b].mean(),
+                            comparison[label_b].max(),
+                            comparison[label_b].min(),
+                            comparison[label_b].max() - comparison[label_b].min(),
+                        ]
+                        stats_fig = go.Figure()
+                        stats_fig.add_trace(
+                            go.Bar(x=categories, y=stats_a, name=label_a)
+                        )
+                        stats_fig.add_trace(
+                            go.Bar(x=categories, y=stats_b, name=label_b)
+                        )
+                        stats_fig.update_layout(
+                            template=plotly_template,
+                            barmode="group",
+                            yaxis_title=variable_title,
+                        )
+                        st.plotly_chart(stats_fig, use_container_width=True)
+
+                    with diff_col:
+                        st.markdown("#### Difference Analysis")
+                        diff_fig = go.Figure()
+                        diff_fig.add_trace(
+                            go.Scatter(
+                                x=diff_series,
+                                y=comparison.index.astype(float),
+                                mode="lines+markers",
+                                fill="tozerox",
+                                name=f"{label_a} – {label_b}",
+                            )
+                        )
+                        diff_fig.update_layout(
+                            template=plotly_template,
+                            xaxis_title=f"Difference ({variable_units})",
+                            yaxis_title="Depth (m)",
+                        )
+                        diff_fig.update_yaxes(autorange="reversed")
+                        st.plotly_chart(diff_fig, use_container_width=True)
+
+                    st.markdown("#### Comparison Summary")
+                    st.markdown(
+                        f"**Data Points:** {data_points}\n\n"
+                        f"**Avg Difference:** {avg_diff:.2f} {variable_units}\n\n"
+                        f"**Max Difference:** {max_diff:.2f} {variable_units}"
+                    )
 
 # -----------------------------
 # Tabular preview (paged-ish)
