@@ -155,18 +155,30 @@ def load_example_queries(path="example_queries.json"):
 # Page config + tiny CSS polish
 # -----------------------------
 st.set_page_config(page_title="🌊 FloatChat — Final Dashboard", layout="wide")
-st.markdown(
-    """
-    <style>
-      /* Reduce any flicker/ghost effect & tighten top spacing */
-      .block-container { padding-top: 1rem; }
-      .stPlotlyChart, .stPlotlyChart > div { opacity: 1 !important; transition: none !important; animation: none !important; }
-      div[data-testid="stVerticalBlock"] { transition: none !important; }
-      .st-emotion-cache-1629p8f { padding-top: 0 !important; } /* Streamlit minor layout fix */
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+
+
+def _apply_base_styles() -> None:
+    """Common layout tweaks applied regardless of theme."""
+
+    st.markdown(
+        """
+        <style>
+          /* Reduce any flicker/ghost effect & tighten top spacing */
+          .block-container { padding-top: 1rem; }
+          .stPlotlyChart, .stPlotlyChart > div {
+              opacity: 1 !important;
+              transition: none !important;
+              animation: none !important;
+          }
+          div[data-testid="stVerticalBlock"] { transition: none !important; }
+          .st-emotion-cache-1629p8f { padding-top: 0 !important; } /* Streamlit minor layout fix */
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+_apply_base_styles()
 
 # -----------------------------
 # Constants
@@ -183,6 +195,103 @@ PLOTLY_TEMPLATES = {
 
 MAP_STYLES_LIGHT = ["open-street-map", "carto-positron", "stamen-terrain"]
 MAP_STYLES_DARK = ["carto-darkmatter", "stamen-toner"]
+
+THEME_OPTIONS = ("Light", "Dark")
+THEME_PALETTES: Dict[str, Dict[str, str]] = {
+    "Light": {
+        "background": "#f5f7fb",
+        "surface": "#ffffff",
+        "text": "#0f172a",
+        "muted_text": "#475569",
+        "accent": "#0f82ff",
+        "accent_soft": "#e4f0ff",
+    },
+    "Dark": {
+        "background": "#0f1729",
+        "surface": "#111c2f",
+        "text": "#f8fafc",
+        "muted_text": "#cbd5f5",
+        "accent": "#4cc9ff",
+        "accent_soft": "#1b2a46",
+    },
+}
+
+
+def _normalize_theme(value: Optional[str]) -> str:
+    if not value:
+        return THEME_OPTIONS[0]
+    value = value.strip().lower()
+    for option in THEME_OPTIONS:
+        if option.lower() == value:
+            return option
+    return THEME_OPTIONS[0]
+
+
+def _load_theme_preference() -> Tuple[str, Dict[str, List[str]]]:
+    """Read persisted theme from query params or session state."""
+
+    query_params = st.experimental_get_query_params()
+    if "theme" in query_params and query_params["theme"]:
+        theme_choice = _normalize_theme(query_params["theme"][0])
+    elif "theme" in st.session_state:
+        theme_choice = _normalize_theme(st.session_state["theme"])
+    else:
+        theme_choice = THEME_OPTIONS[0]
+
+    st.session_state.setdefault("theme", theme_choice)
+    return theme_choice, query_params
+
+
+def _persist_theme(theme_choice: str, query_params: Dict[str, List[str]]) -> None:
+    """Update session + URL query params so theme survives reloads."""
+
+    st.session_state["theme"] = theme_choice
+    updated = {k: v for k, v in query_params.items() if k != "theme"}
+    updated["theme"] = theme_choice.lower()
+    st.experimental_set_query_params(**updated)
+
+
+def _apply_theme_styles(theme_choice: str) -> None:
+    palette = THEME_PALETTES.get(theme_choice, THEME_PALETTES[THEME_OPTIONS[0]])
+    st.markdown(
+        f"""
+        <style>
+          :root {{
+            color-scheme: {'dark' if theme_choice == 'Dark' else 'light'};
+          }}
+          [data-testid="stAppViewContainer"] {{
+            background: {palette['background']};
+            color: {palette['text']};
+          }}
+          [data-testid="stSidebar"] {{
+            background: {palette['surface']};
+            color: {palette['text']};
+          }}
+          [data-testid="stSidebar"] * {{ color: inherit; }}
+          .stMarkdown p, .stMarkdown li {{ color: {palette['muted_text']}; }}
+          div[data-testid="stMetric"] {{
+            background: {palette['surface']};
+            border-radius: 14px;
+            padding: 0.75rem 1rem;
+            border: 1px solid {palette['accent_soft']};
+            box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08);
+          }}
+          div[data-testid="stMetric"] label {{ color: {palette['muted_text']}; }}
+          div[data-testid="stMetric"] div[data-testid="stMetricValue"] {{ color: {palette['text']}; }}
+          .quick-chip {{
+            background: {palette['accent_soft']};
+            border-radius: 999px;
+            color: {palette['accent']};
+            display: inline-flex;
+            align-items: center;
+            padding: 0.35rem 0.75rem;
+            font-size: 0.8rem;
+            margin: 0.2rem 0.4rem 0.2rem 0;
+          }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 # -----------------------------
 # Query parsing + chat helpers
@@ -689,6 +798,11 @@ if not parquets:
     st.error("❌ No parquet files found in data_cache/.")
     st.stop()
 
+initial_theme, query_params = _load_theme_preference()
+map_options = MAP_STYLES_LIGHT + MAP_STYLES_DARK
+default_map_from_theme = MAP_STYLES_LIGHT[0] if initial_theme == "Light" else MAP_STYLES_DARK[0]
+st.session_state.setdefault("map_style", default_map_from_theme)
+
 with st.sidebar:
     st.header("📂 Data Source")
     names = [p.name for p in parquets]
@@ -696,18 +810,28 @@ with st.sidebar:
     file_choice = st.selectbox("Select a parquet", parquets, index=default_idx)
     st.caption(f"Selected: {file_choice.name}")
 
+    st.divider()
     st.header("🎨 Theme")
-    theme = st.radio("Theme", ["Light", "Dark"], horizontal=True)
-    plotly_template = PLOTLY_TEMPLATES[theme]
-    map_style_default = (MAP_STYLES_LIGHT[0] if theme == "Light" else MAP_STYLES_DARK[0])
+    theme = st.radio("Theme", THEME_OPTIONS, horizontal=True, index=THEME_OPTIONS.index(initial_theme))
+    st.caption("Choose your preferred look — remembered next time you return ✨")
 
+    st.divider()
     st.header("🗺️ Map View")
     focus_india = st.checkbox("🇮🇳 Focus India (default)", value=True)
     world_view = st.checkbox("🌍 World view", value=False)
+
+    # Reset map style when switching between light/dark palettes for readability
+    map_style_default = MAP_STYLES_LIGHT[0] if theme == "Light" else MAP_STYLES_DARK[0]
+    if theme == "Light" and st.session_state.get("map_style") in MAP_STYLES_DARK:
+        st.session_state["map_style"] = map_style_default
+    elif theme == "Dark" and st.session_state.get("map_style") in MAP_STYLES_LIGHT:
+        st.session_state["map_style"] = map_style_default
+
     map_style = st.selectbox(
         "Map style",
-        (MAP_STYLES_LIGHT + MAP_STYLES_DARK),
-        index=(MAP_STYLES_LIGHT + MAP_STYLES_DARK).index(map_style_default),
+        map_options,
+        index=map_options.index(st.session_state.get("map_style", map_style_default)),
+        key="map_style",
     )
 
     st.header("🛰️ Live Layers")
@@ -722,6 +846,15 @@ with st.sidebar:
         date_cols = []
     use_date_filter = st.checkbox("Filter by date", value=False) if "date" in date_cols else False
     max_points = st.slider("Plot sample size (points)", 2_000, 50_000, 10_000, step=2_000)
+
+
+if theme != st.session_state.get("theme") or query_params.get("theme", [None])[0] != theme.lower():
+    _persist_theme(theme, query_params)
+
+_apply_theme_styles(theme)
+
+plotly_template = PLOTLY_TEMPLATES[theme]
+map_style_default = MAP_STYLES_LIGHT[0] if theme == "Light" else MAP_STYLES_DARK[0]
 
 # -----------------------------
 # Load & Filter
@@ -752,6 +885,76 @@ with col2:
 with col3:
     if "date" in df.columns and len(df) > 0:
         st.metric("Date Range", f"{df['date'].min().date()} → {df['date'].max().date()}")
+
+# -----------------------------
+# Quick insights & highlights
+# -----------------------------
+st.markdown("### 🔍 Quick Insights")
+insight_cols = st.columns((2, 1))
+
+with insight_cols[0]:
+    if "date" in df.columns and len(df) > 0:
+        timeline = pd.to_datetime(df["date"], errors="coerce").dropna()
+        if not timeline.empty:
+            monthly = (
+                timeline.dt.to_period("M")
+                .value_counts()
+                .sort_index()
+                .rename_axis("month")
+                .reset_index(name="profiles")
+            )
+            monthly["month"] = monthly["month"].astype(str)
+            timeline_fig = px.area(
+                monthly,
+                x="month",
+                y="profiles",
+                labels={"month": "Month", "profiles": "Profiles"},
+                template=plotly_template,
+            )
+            timeline_fig.update_traces(line_color="#3b82f6")
+            timeline_fig.update_layout(height=260, margin=dict(l=0, r=0, t=10, b=0))
+            st.plotly_chart(timeline_fig, use_container_width=True)
+        else:
+            st.info("No valid timestamps available for timeline insights.")
+    else:
+        st.info("Add a dataset with dates to unlock temporal insights.")
+
+with insight_cols[1]:
+    highlight_lines: List[str] = []
+    if "temp" in df.columns and not df["temp"].dropna().empty:
+        highlight_lines.append(f"🌡️ Avg Temp: {df['temp'].dropna().mean():.1f} °C")
+    if "psal" in df.columns and not df["psal"].dropna().empty:
+        highlight_lines.append(f"🧂 Avg Salinity: {df['psal'].dropna().mean():.2f} PSU")
+    if "pres" in df.columns and not df["pres"].dropna().empty:
+        highlight_lines.append(f"📏 Max Depth: {df['pres'].dropna().max():,.0f} dbar")
+
+    if highlight_lines:
+        st.markdown("#### Snapshot")
+        for line in highlight_lines:
+            st.markdown(f"- {line}")
+
+    chips_html = []
+    for column_name in ["ocean", "platform_type", "data_mode"]:
+        if column_name in df.columns and not df[column_name].dropna().empty:
+            top_values = (
+                df[column_name]
+                .dropna()
+                .astype(str)
+                .value_counts()
+                .head(4)
+                .items()
+            )
+            pretty_name = column_name.replace("_", " ").title()
+            chips_html.append(f"<p><strong>{pretty_name}</strong><br>")
+            chips_html.append(
+                "".join(
+                    f"<span class='quick-chip'>{label} · {count:,}</span>" for label, count in top_values
+                )
+            )
+            chips_html.append("</p>")
+
+    if chips_html:
+        st.markdown("".join(chips_html), unsafe_allow_html=True)
 
 # Precompute commonly reused slices for snappier tab changes
 latlon_available = {"latitude", "longitude"}.issubset(df.columns)
