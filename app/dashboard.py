@@ -491,11 +491,15 @@ def render_map_legend(theme_choice: str, show_noaa: bool, show_incois: bool) -> 
     }
 
     legend_html_parts = [
+
         (
             "<div class='map-legend' "
             f"style=\"background:{bg};color:{text_color};border:1px solid {palette['accent_soft']};"
             "border-radius:14px;padding:1rem;box-shadow:0 6px 18px rgba(15,23,42,0.12);\">"
         )
+
+        f"<div class='map-legend' style='background:{bg};color:{text_color};border:1px solid {palette['accent_soft']};"
+        "border-radius:14px;padding:1rem;box-shadow:0 6px 18px rgba(15,23,42,0.12);'>"
     ]
 
     for item in MAP_LEGEND_ITEMS:
