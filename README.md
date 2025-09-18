@@ -1,34 +1,39 @@
 # 🌊 FloatChat — Conversational Explorer for ARGO Floats
 
-FloatChat is a Streamlit dashboard that lets you explore ARGO float profiles with natural language. The current build focuses on a smooth judge-ready demo for Indian Ocean datasets, quick geospatial insights, and a chat assistant that understands place names and time windows.
+FloatChat is a Streamlit application that turns the ARGO float archive into an interactive, judge-ready demo. It combines rich visual exploration, lightweight analytics, and a natural-language assistant tailored for the Indian Ocean focus area.
 
-## 🚀 Highlights (Current State)
+## 🚀 Feature Snapshot
 
-- **Map stability fix** – Leaflet maps now render as static components, so panning/zooming no longer forces the entire Streamlit app to reload.
-- **Named-place understanding** – Queries such as “show me floats near Mumbai” or “average PSAL near Odisha in March 2023” are geocoded via OpenStreetMap and translated into latitude/longitude filters automatically.
-- **On-demand summaries** – Ask for statistics like average/median/min/max/count for key variables (temperature, salinity, etc.) and see the result along with optional profile plots and maps.
-- **Live overlays** – Toggle NOAA buoy stations and INCOIS demo moorings on both Plotly and Leaflet maps.
-- **Hybrid chat fallback** – When the local dataset cannot satisfy a request, FloatChat surfaces web snippets and (if available) responds via a local Ollama model.
+- **Multiple exploration tabs** – Jump between Plotly maps, a static Leaflet view, a Cesium 3D globe, depth profiles, Hovmöller diagrams, float-to-float comparisons, raw tables, and export utilities without leaving the page.
+- **Live overlays and quick stats** – Blend cached float data with NOAA buoy metadata, INCOIS demo moorings, and dataset summaries (timeline, quick chips, profile snapshots) directly inside the dashboard.
+- **Theme + map controls** – Persisted light/dark themes, India-first or global map focus, and curated Mapbox styles keep the UI responsive on repeated judge walkthroughs.
+- **Chat-driven insights** – Natural-language queries understand places, coordinates, time windows, and statistics. Matching results trigger inline charts, map snippets, and aggregated summaries.
+- **Hybrid fallback** – When cached data cannot answer a question, FloatChat can enrich replies with DuckDuckGo snippets and—if an Ollama model is running—locally generated context-aware answers.
 
 ## 🧪 Try These Queries
 
-Paste these into the chat tab to experience the new parsing logic:
+Use the **💬 Chat** tab or the quick buttons sourced from `app/example_queries.json`:
 
 - “Show me ARGO floats near Mumbai.”
 - “Average PSAL of the ocean near Odisha in March 2023.”
 - “Plot floats around Lakshadweep on the map.”
+- “Compare BGC parameters in the Arabian Sea for the last 6 months.”
 - “Show me salinity profiles near the equator in March 2023.”
 
-## 📁 Project Layout
+## 📁 Repository Layout
 
 ```
 app/
-  dashboard.py          # Streamlit entry-point (charts, chat, maps)
-  example_queries.json  # Buttons rendered in the chat tab
-  converter.py          # Helper to convert NetCDF → Parquet
-scripts/                # Offline data ingestion utilities
-requirements.txt        # Python dependencies
+  dashboard.py          # Streamlit entry point orchestrating UI + chat
+  example_queries.json  # Pre-baked prompts exposed in the chat tab
+  converter.py          # NetCDF ➜ Parquet helper for offline preparation
+requirements.txt        # Runtime dependencies (Streamlit, Plotly, DDGS, Ollama…)
+scripts/
+  datasets/             # Demo assets (e.g. INCOIS buoy metadata)
+  ...                   # Data ingestion helpers referenced in roadmap
 ```
+
+FloatChat expects float profiles to be cached in `data_cache/`. The default configuration looks for `argo_index_indian.parquet`, but any Parquet file with the normalised schema works.
 
 ## ⚙️ Getting Started
 
@@ -36,41 +41,37 @@ requirements.txt        # Python dependencies
    ```bash
    pip install -r requirements.txt
    ```
-2. **Prepare data**
-   - Place Parquet files inside `data_cache/`. A sample `argo_index_indian.parquet` is expected by default.
+2. **Prepare float data**
+   - Place one or more Parquet files inside `data_cache/`.
+   - Use `app/converter.py` (or your own ETL) to turn NetCDF drops into the slimmed-down Parquet schema with columns such as `time`, `date`, `latitude`, `longitude`, `temp`, `psal`, and `pres`.
 3. **Run the dashboard**
    ```bash
    streamlit run app/dashboard.py
    ```
-4. **(Optional) Enable local LLM answers**
-   - Install [Ollama](https://ollama.com/) and pull a model such as `mistral`.
-   - Set `OLLAMA_MODEL` in `.env` if you want to override the default.
+4. **(Optional) Enable the hybrid fallback**
+   - Install [Ollama](https://ollama.com/) locally and pull a model such as `mistral`.
+   - Optionally set `OLLAMA_MODEL` via `.env` or your shell. Without an Ollama service, web snippets from DuckDuckGo are still displayed when data filters return no rows.
 
-## 🧠 How Natural-Language Queries Work Now
+## 🧠 Query Understanding Pipeline
 
-1. We normalise aliases for temperature, salinity, dissolved oxygen, etc.
-2. The parser looks for:
-   - Named places (`near Mumbai`, `in Bay of Bengal`) → geocoded to bounding boxes.
-   - Explicit latitude/longitude ranges.
-   - Temporal windows (`March 2023`, `last 6 months`).
-   - Statistical intents (`average`, `median`, `count`, ...).
-3. Filters are applied to the cached Parquet frame. Results fan out to:
-   - Profile plots when depth variables are available.
-   - Scatter maps with sampled points.
-   - Aggregated statistics summarised in plain English.
-4. If no data matches, a hybrid fallback (DuckDuckGo search + Ollama) is used.
+The chat assistant combines rule-based parsing with cached analytics:
 
-## 🔍 Known Limitations & Future Scope
+1. **Alias normalisation** – Temperature, salinity, oxygen, and other oceanography keywords are mapped to canonical column names.
+2. **Spatial detection** – Named places (via OpenStreetMap geocoding), latitude/longitude ranges, and “near lat, lon” phrases translate into bounding boxes.
+3. **Temporal parsing** – Absolute dates (`March 2023`), ranges, and “last N months/weeks/days” filters constrain the Parquet frame.
+4. **Intent extraction** – Statistical verbs (`average`, `count`, `median`, etc.) and “map/profile” hints decide whether to build aggregations, depth profiles, or map figures.
+5. **Result rendering** – Matching rows power Plotly charts, inline summaries, and chat replies. When nothing matches, FloatChat surfaces external context and reminds users how to align questions with the cached dataset.
 
-- **Vector / SQL backends** – The original roadmap mentioned FAISS/Chroma and SQL translation. The current build operates on cached Parquet files only. Future work: plug in a vector index for semantic retrieval, plus SQL generation for large catalogues.
-- **Richer analytics** – Only single-variable aggregates are supported right now. Expanding to anomalies, trends, and multi-variable comparisons would add depth.
-- **Offline geocoding cache** – We rely on live OpenStreetMap geocoding. Shipping a small cache (or offline gazetteer) would make demos more resilient.
-- **Data freshness** – Live NOAA/INCOIS layers are demo endpoints. Integrating authenticated feeds or additional regional datasets is on the backlog.
-- **Model integration** – Remote GPT-style models and MCP connectors are not wired in yet; today’s assistant targets local Ollama deployments.
+## 🔍 Known Limitations & Roadmap
+
+- **Local-first data** – Parquet caches remain the primary data source; incremental refresh, DuckDB/Postgres sinks, and ERDDAP pull automation are future upgrades.
+- **Optional dependencies** – Cesium, Folium, geopy, and Ollama integrations are wrapped in graceful fallbacks. Install the optional packages for the best experience.
+- **Advanced analytics** – Multi-variable anomalies, climatology comparisons, and richer trend analysis are earmarked for post-demo iterations.
+- **Geocoding resilience** – Live OpenStreetMap geocoding is used when no cache is available. Bundling an offline gazetteer is on the backlog.
 
 ## 🤝 Contributing
 
-Issues and pull requests are welcome! Please lint/format your code and document new data dependencies in `requirements.txt` and this README.
+Contributions are welcome! Please format your code, update documentation for new datasets or dependencies, and share reproducible steps when filing issues.
 
 ## 📄 License
 
