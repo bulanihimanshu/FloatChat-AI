@@ -7,6 +7,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 import json
 import pandas as pd
+import numpy as np
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
@@ -211,6 +212,32 @@ PLOTLY_TEMPLATES = {
 
 MAP_STYLES_LIGHT = ["open-street-map", "carto-positron", "stamen-terrain"]
 MAP_STYLES_DARK = ["carto-darkmatter", "stamen-toner"]
+
+LOCATION_COORDINATES: Dict[str, Tuple[float, float]] = {
+    "mumbai": (19.0760, 72.8777),
+    "chennai": (13.0827, 80.2707),
+    "goa": (15.2993, 74.1240),
+    "kochi": (9.9312, 76.2673),
+}
+
+LOCATION_ALIASES: Dict[str, str] = {
+    "mumbai": "mumbai",
+    "bombay": "mumbai",
+    "chennai": "chennai",
+    "madras": "chennai",
+    "goa": "goa",
+    "kochi": "kochi",
+    "cochin": "kochi",
+}
+
+LOCATION_DISPLAY_NAMES: Dict[str, str] = {
+    "mumbai": "Mumbai",
+    "chennai": "Chennai",
+    "goa": "Goa",
+    "kochi": "Kochi",
+}
+
+NEARBY_RADIUS_DEG = 5.0
 
 THEME_OPTIONS = ("Light", "Dark")
 THEME_PALETTES: Dict[str, Dict[str, str]] = {
@@ -843,6 +870,150 @@ def _infer_map_view(df: pd.DataFrame) -> Tuple[Dict[str, float], float]:
         zoom = 1.5
 
     return center, zoom
+
+
+def _normalize_location_name(name: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z\s]", " ", name).lower()
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _match_location_key(name: str) -> Optional[str]:
+    normalized = _normalize_location_name(name)
+    if not normalized:
+        return None
+
+    for alias, canonical in LOCATION_ALIASES.items():
+        if normalized == alias or normalized.startswith(f"{alias} "):
+            return canonical
+
+    return None
+
+
+def resolve_location(name: str) -> Optional[Tuple[float, float]]:
+    """Map a known coastal city name to coordinates."""
+
+    key = _match_location_key(name)
+    if key is None:
+        return None
+    return LOCATION_COORDINATES.get(key)
+
+
+def _location_display_name(name: str) -> str:
+    key = _match_location_key(name)
+    if key and key in LOCATION_DISPLAY_NAMES:
+        return LOCATION_DISPLAY_NAMES[key]
+    return name.strip().title() or "the requested location"
+
+
+def floats_near_location(
+    df: pd.DataFrame,
+    lat: float,
+    lon: float,
+    radius_deg: float = NEARBY_RADIUS_DEG,
+) -> pd.DataFrame:
+    """Filter floats that sit within ~radius_deg degrees (~111 km/deg) of the location."""
+
+    if df.empty or not {"latitude", "longitude"}.issubset(df.columns):
+        return df.iloc[0:0]
+
+    latitudes = pd.to_numeric(df["latitude"], errors="coerce")
+    longitudes = pd.to_numeric(df["longitude"], errors="coerce")
+    valid_mask = latitudes.notna() & longitudes.notna()
+
+    if not bool(valid_mask.any()):
+        return df.iloc[0:0]
+
+    valid_df = df.loc[valid_mask].copy()
+    latitudes_rad = np.radians(latitudes[valid_mask].to_numpy())
+    longitudes_rad = np.radians(longitudes[valid_mask].to_numpy())
+
+    lat0 = np.radians(lat)
+    lon0 = np.radians(lon)
+
+    dlat = latitudes_rad - lat0
+    dlon = longitudes_rad - lon0
+
+    a = (
+        np.sin(dlat / 2.0) ** 2
+        + np.cos(lat0) * np.cos(latitudes_rad) * np.sin(dlon / 2.0) ** 2
+    )
+    c = 2 * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
+    earth_radius_km = 6371.0
+    distances_km = earth_radius_km * c
+
+    radius_km = radius_deg * 111.0
+    within_mask = distances_km <= radius_km
+
+    nearby_df = valid_df.loc[within_mask].copy()
+    if nearby_df.empty:
+        return nearby_df
+
+    nearby_df.loc[:, "distance_km"] = distances_km[within_mask]
+    return nearby_df
+
+
+def plot_nearby_floats(
+    df: pd.DataFrame,
+    lat: float,
+    lon: float,
+    name: str,
+    template: str,
+) -> Optional[go.Figure]:
+    """Build a Mapbox scatter plot centred on the requested location."""
+
+    if df.empty or not {"latitude", "longitude"}.issubset(df.columns):
+        return None
+
+    map_style = st.session_state.get("map_style", MAP_STYLES_LIGHT[0])
+    hover_fields = [
+        c
+        for c in ("platform_number", "date", "distance_km")
+        if c in df.columns
+    ]
+
+    scatter_kwargs: Dict[str, Any] = {
+        "lat": "latitude",
+        "lon": "longitude",
+        "hover_data": hover_fields if hover_fields else None,
+        "template": template,
+        "height": 420,
+        "title": f"ARGO floats near {name}",
+    }
+    if "distance_km" in df.columns:
+        scatter_kwargs.update(
+            {
+                "color": "distance_km",
+                "color_continuous_scale": "Teal",
+            }
+        )
+
+    fig = px.scatter_mapbox(df, **scatter_kwargs)
+
+    fig.update_traces(marker=dict(size=10, opacity=0.8))
+    fig.update_layout(
+        mapbox=dict(style=map_style, center=dict(lat=lat, lon=lon), zoom=5),
+        margin=dict(l=0, r=0, t=40, b=0),
+        legend=dict(orientation="h"),
+    )
+
+    fig.add_scattermapbox(
+        lat=[lat],
+        lon=[lon],
+        mode="markers",
+        marker=dict(size=16, color="#ff6b6b", symbol="star"),
+        name=f"{name} centre",
+        hoverinfo="skip",
+    )
+
+    return fig
+
+
+def extract_near_location(query: str) -> Optional[str]:
+    match = re.search(r"near\s+([a-zA-Z\s]+)", query, re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(1).strip()
 
 
 def build_map_figure(
@@ -1611,6 +1782,57 @@ with tab_chat:
     def process_query(query: str):
         st.session_state["messages"].append({"role": "user", "content": query})
         st.chat_message("user").write(query)
+
+        location_fragment = extract_near_location(query)
+        if location_fragment:
+            display_name = _location_display_name(location_fragment)
+            assistant_text = ""
+            map_figure: Optional[go.Figure] = None
+            with st.spinner(f"📍 Searching floats near {display_name}..."):
+                coords = resolve_location(location_fragment)
+                if coords is None:
+                    assistant_text = (
+                        f"I couldn't resolve \"{location_fragment}\" to a supported coastal city yet. "
+                        "Try Mumbai, Chennai, Goa, or Kochi."
+                    )
+                else:
+                    lat, lon = coords
+                    nearby_df = floats_near_location(df_full, lat, lon, radius_deg=NEARBY_RADIUS_DEG)
+                    if nearby_df.empty:
+                        assistant_text = (
+                            f"I couldn't find any floats within ~{int(NEARBY_RADIUS_DEG * 111)} km of {display_name} "
+                            "in the cached dataset."
+                        )
+                    else:
+                        map_figure = plot_nearby_floats(nearby_df, lat, lon, display_name, plotly_template)
+                        float_count = (
+                            nearby_df["platform_number"].nunique()
+                            if "platform_number" in nearby_df.columns
+                            else None
+                        )
+                        record_count = len(nearby_df)
+                        radius_km = int(NEARBY_RADIUS_DEG * 111)
+                        if float_count is not None:
+                            assistant_text = (
+                                f"Found {float_count:,} unique floats ({record_count:,} records) within ~{radius_km} km of {display_name}. "
+                                "Here's a map you can explore."
+                            )
+                        else:
+                            assistant_text = (
+                                f"Found {record_count:,} float records within ~{radius_km} km of {display_name}. "
+                                "Here's a map you can explore."
+                            )
+                        if map_figure is None:
+                            assistant_text += (
+                                "\n(I couldn't render the map because latitude/longitude columns are missing.)"
+                            )
+
+            assistant_chat = st.chat_message("assistant")
+            st.session_state["messages"].append({"role": "assistant", "content": assistant_text})
+            assistant_chat.write(assistant_text)
+            if map_figure is not None:
+                assistant_chat.plotly_chart(map_figure, use_container_width=True)
+            return
 
         with st.spinner("⚙️ Running query pipeline..."):
             result = run_query_pipeline(query, df_full, plotly_template)
