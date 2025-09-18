@@ -7,3 +7,4 @@ data_cache/
 # Python virtual environment
 venv/
 .env
+app/__pycache__/

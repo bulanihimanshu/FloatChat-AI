@@ -1,0 +1,5 @@
+[
+  {"station_id": "INCOIS001", "latitude": 19.0, "longitude": 72.8, "sst": 28.5, "wind_speed": 4.2},
+  {"station_id": "INCOIS002", "latitude": 15.5, "longitude": 73.8, "sst": 27.9, "wind_speed": 5.0},
+  {"station_id": "INCOIS003", "latitude": 8.5, "longitude": 76.9, "sst": 29.1, "wind_speed": 6.1}
+]
