@@ -11,6 +11,7 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 from functools import lru_cache
+from textwrap import dedent
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -490,37 +491,53 @@ def render_map_legend(theme_choice: str, show_noaa: bool, show_incois: bool) -> 
         "incois": show_incois,
     }
 
-    legend_html_parts = [
-        (
-            "<div class='map-legend' "
-            f"style=\"background:{bg};color:{text_color};border:1px solid {palette['accent_soft']};"
-            "border-radius:14px;padding:1rem;box-shadow:0 6px 18px rgba(15,23,42,0.12);\">"
-        )
+    container_style = ";".join(
+        [
+            f"background:{bg}",
+            f"color:{text_color}",
+            f"border:1px solid {palette['accent_soft']}",
+            "border-radius:14px",
+            "padding:1rem",
+            "box-shadow:0 6px 18px rgba(15,23,42,0.12)",
+        ]
+    )
 
-    ]
+    legend_html_parts = [f"<div class='map-legend' style=\"{container_style};\">"]
 
-    for item in MAP_LEGEND_ITEMS:
-        active = visibility.get(item["key"], False)
-        opacity = 1.0 if active else 0.4
-        status = "" if active else " (hidden)"
+    active_items = [item for item in MAP_LEGEND_ITEMS if visibility.get(item["key"], False)]
+
+    if not active_items:
         legend_html_parts.append(
-            """
-            <div style="display:flex;align-items:flex-start;margin-bottom:0.75rem;opacity:{opacity};">
-              <span style="flex:none;width:16px;height:16px;border-radius:4px;background:{color};margin-top:2px;margin-right:0.65rem;"></span>
-              <div style="font-size:0.85rem;line-height:1.3;">
-                <strong>{label}{status}</strong><br>
-                <span style="color:{muted};">{description}</span>
-              </div>
-            </div>
-            """.format(
-                opacity=opacity,
-                color=item["color"],
-                label=item["label"],
-                status=status,
-                muted=muted,
-                description=item["description"],
-            )
+            f"<p style=\"margin:0;color:{muted};font-size:0.85rem;\">No map layers visible.</p>"
         )
+    else:
+        for index, item in enumerate(active_items):
+            is_last = index == len(active_items) - 1
+            opacity = 1.0
+            entry_style = (
+                "display:flex;align-items:flex-start;"
+                f"margin-bottom:{'0' if is_last else '0.75rem'};opacity:{opacity};"
+            )
+            dot_style = (
+                "flex:none;width:16px;height:16px;border-radius:4px;"
+                f"background:{item['color']};margin-top:2px;margin-right:0.65rem;"
+            )
+            text_style = "font-size:0.85rem;line-height:1.3;"
+            desc_style = f"color:{muted};"
+
+            legend_html_parts.append(
+                dedent(
+                    f"""
+                    <div style="{entry_style}">
+                      <span style="{dot_style}"></span>
+                      <div style="{text_style}">
+                        <strong>{item['label']}</strong><br>
+                        <span style="{desc_style}">{item['description']}</span>
+                      </div>
+                    </div>
+                    """
+                ).strip()
+            )
 
     legend_html_parts.append("</div>")
     st.markdown("".join(legend_html_parts), unsafe_allow_html=True)
