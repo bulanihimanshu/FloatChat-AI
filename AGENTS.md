@@ -85,8 +85,6 @@ This document explains the **agents (functional modules)** in the FloatChat proj
 
 ## 🔹 Workflow
 
-![FloatChat Workflow Diagram](assets/floatchat_workflow.png)
-
 <details>
 <summary>Mermaid source (for editing):</summary>
 
