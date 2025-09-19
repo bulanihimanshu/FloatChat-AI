@@ -7,7 +7,7 @@ FloatChat is a Streamlit application that turns the ARGO float archive into an i
 - **Multiple exploration tabs** – Jump between Plotly maps, a static Leaflet view, a Cesium 3D globe, depth profiles, Hovmöller diagrams, float-to-float comparisons, raw tables, and export utilities without leaving the page.
 - **Live overlays and quick stats** – Blend cached float data with NOAA buoy metadata, INCOIS demo moorings, and dataset summaries (timeline, quick chips, profile snapshots) directly inside the dashboard.
 - **Theme + map controls** – Persisted light/dark themes, India-first or global map focus, and curated Mapbox styles keep the UI responsive on repeated judge walkthroughs.
-- **Chat-driven insights** – Natural-language queries understand places, coordinates, time windows, and statistics. Matching results trigger inline charts, map snippets, and aggregated summaries.
+- **Chat-driven insights** – Natural-language queries understand places, coordinates, time windows, statistics, comparisons, and nearest-float lookups. Matching results trigger inline charts, map snippets, and aggregated summaries.
 - **Hybrid fallback** – When cached data cannot answer a question, FloatChat can enrich replies with DuckDuckGo snippets and—if an Ollama model is running—locally generated context-aware answers.
 
 ## 🧪 Try These Queries
@@ -57,10 +57,46 @@ FloatChat expects float profiles to be cached in `data_cache/`. The default conf
 The chat assistant combines rule-based parsing with cached analytics:
 
 1. **Alias normalisation** – Temperature, salinity, oxygen, and other oceanography keywords are mapped to canonical column names.
-2. **Spatial detection** – Named places (via OpenStreetMap geocoding), latitude/longitude ranges, and “near lat, lon” phrases translate into bounding boxes.
+2. **Spatial detection** – Named places (via OpenStreetMap geocoding), latitude/longitude ranges, and “near lat, lon” phrases translate into bounding boxes plus target points for distance searches.
 3. **Temporal parsing** – Absolute dates (`March 2023`), ranges, and “last N months/weeks/days” filters constrain the Parquet frame.
-4. **Intent extraction** – Statistical verbs (`average`, `count`, `median`, etc.) and “map/profile” hints decide whether to build aggregations, depth profiles, or map figures.
+4. **Intent extraction** – Statistical verbs (`average`, `count`, `median`, etc.), comparison keywords, and diagram hints decide whether to build aggregations, depth profiles, float comparisons, nearest-float tables, or Hovmöller heatmaps.
 5. **Result rendering** – Matching rows power Plotly charts, inline summaries, and chat replies. When nothing matches, FloatChat surfaces external context and reminds users how to align questions with the cached dataset.
+
+## 🏛️ System Architecture
+
+FloatChat follows a modular architecture that keeps data access, parsing, and presentation concerns isolated:
+
+- **Streamlit front-end** – Hosts the multi-tab experience, session state, and chat interface.
+- **Data agent** – Loads cached Parquet files, normalises schemas, and hydrates quick stats used across tabs.
+- **Filter/intent agent** – Parses natural-language prompts, geocodes locations, and compiles temporal/spatial filters.
+- **Visualisation agent** – Renders Plotly, Folium, and Cesium components alongside specialised builders (profiles, comparisons, Hovmöller diagrams).
+- **Chat agent** – Orchestrates the query pipeline, picks the right visual, and escalates to hybrid LLM/web fallbacks when data is missing.
+- **Integration layer** – Coordinates sidebar controls, theme persistence, and data exports while sharing cached slices between tabs.
+
+These layers communicate through shared session state and cached DataFrame slices, ensuring that insights discovered via chat mirror what the visual tabs display.
+
+## 🔁 Workflow Flowchart
+
+```text
+User Prompt ─┐
+             │
+             ▼
+      Intent & Filter Parser
+             │
+             ▼
+     DataFrame Filter Engine
+             │
+     ┌───────┴─────────┐
+     │                 │
+     ▼                 ▼
+Chart Builders   Nearest/LLM Fallbacks
+ (Profiles,          │
+  Comparison,        ▼
+  Hovmöller)   Response Composer
+             │
+             ▼
+      Chat + Tab Output
+```
 
 ## 🔍 Known Limitations & Roadmap
 
