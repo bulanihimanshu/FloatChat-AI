@@ -259,6 +259,29 @@ PLACE_RADIUS_DEG = 2.5
 VARIABLE_CATALOG: Dict[str, Tuple[str, str, str]] = {
     "🌡️ Temperature": ("temp", "Temperature (°C)", "°C"),
     "🧂 Salinity": ("psal", "Salinity (PSU)", "PSU"),
+    "🫧 Dissolved Oxygen": ("doxy", "Dissolved Oxygen", "µmol/kg"),
+    "🌿 Chlorophyll-a": ("chlorophyll", "Chlorophyll-a", "mg/m³"),
+    "🧪 Nitrate": ("nitrate", "Nitrate", "µmol/L"),
+    "🔆 Backscatter (700 nm)": ("bbp700", "Backscatter 700nm", "m⁻¹"),
+}
+BGC_VARIABLE_KEYS: Tuple[str, ...] = (
+    "doxy",
+    "chlorophyll",
+    "nitrate",
+    "bbp700",
+    "cdom",
+    "ph_in_situ_total",
+)
+INTENT_KEYWORDS: Dict[str, str] = {
+    "hovmoller": "hovmoller",
+    "hovmoeller": "hovmoller",
+    "heatmap": "hovmoller",
+    "compare": "comparison",
+    "comparison": "comparison",
+    "versus": "comparison",
+    "vs": "comparison",
+    "nearest": "nearest",
+    "closest": "nearest",
 }
 AGGREGATION_KEYWORDS: Dict[str, str] = {
     "average": "mean",
@@ -397,6 +420,22 @@ def render_leaflet_map(m: "folium.Map", height: int = 620) -> None: # type: igno
         st.warning("Unable to render Leaflet map.")
         return
     st.components.v1.html(html, height=height, scrolling=False)
+
+
+def _haversine_km(lat1: np.ndarray, lon1: np.ndarray, lat2: float, lon2: float) -> np.ndarray:
+    """Compute great-circle distance (in km) between vectors and a reference point."""
+
+    lat1_rad = np.radians(lat1.astype(float))
+    lon1_rad = np.radians(lon1.astype(float))
+    lat2_rad = np.radians(float(lat2))
+    lon2_rad = np.radians(float(lon2))
+
+    dlat = lat2_rad - lat1_rad
+    dlon = lon2_rad - lon1_rad
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1_rad) * np.cos(lat2_rad) * np.sin(dlon / 2.0) ** 2
+    c = 2 * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
+    earth_radius_km = 6371.0
+    return earth_radius_km * c
 
 
 def _normalize_theme(value: Optional[str]) -> str:
@@ -685,7 +724,9 @@ def _extract_near_ranges(text: str) -> Tuple[Optional[Tuple[float, float]], Opti
 PLACE_KEYWORDS = ("near", "around", "close to", "in", "at")
 
 
-def _extract_place_bbox(text: str) -> Optional[Tuple[Tuple[float, float], Tuple[float, float], str]]:
+def _extract_place_bbox(
+    text: str,
+) -> Optional[Tuple[Tuple[float, float], Tuple[float, float], str, Tuple[float, float]]]:
     """Look for named places (e.g., 'near Mumbai') and geocode them."""
 
     cleaned = text.lower()
@@ -708,7 +749,11 @@ def _extract_place_bbox(text: str) -> Optional[Tuple[Tuple[float, float], Tuple[
                 lon_range = place_info.get("lon_range")
                 name = place_info.get("name", candidate.title())
                 if lat_range and lon_range:
-                    return lat_range, lon_range, name
+                    center = (
+                        float(place_info.get("lat", sum(lat_range) / 2.0)),
+                        float(place_info.get("lon", sum(lon_range) / 2.0)),
+                    )
+                    return lat_range, lon_range, name, center
     return None
 
 
@@ -776,15 +821,22 @@ def llm_parse_query(query: str) -> Dict[str, Any]:
         filters["lat_range"] = near_lat
     if near_lon and "lon_range" not in filters:
         filters["lon_range"] = near_lon
+    if near_lat and near_lon:
+        filters["target_point"] = (
+            sum(near_lat) / 2.0,
+            sum(near_lon) / 2.0,
+        )
 
     place_bbox = _extract_place_bbox(lower)
     if place_bbox:
-        lat_range, lon_range, place_name = place_bbox
+        lat_range, lon_range, place_name, center = place_bbox
         if "lat_range" not in filters:
             filters["lat_range"] = lat_range
         if "lon_range" not in filters:
             filters["lon_range"] = lon_range
         filters["place_label"] = place_name
+        if center:
+            filters["target_point"] = center
         filters.setdefault("wants_map", True)
 
     lat_range = _extract_axis_range(lower, "lat")
@@ -815,6 +867,17 @@ def llm_parse_query(query: str) -> Dict[str, Any]:
 
     if any(token in lower for token in (" map", "show ", "plot", "where are", "near")):
         filters.setdefault("wants_map", True)
+
+    for token, intent in INTENT_KEYWORDS.items():
+        if token in lower:
+            filters.setdefault("intent", intent)
+
+    if re.search(r"\bbgc\b|biogeochemical", lower):
+        filters["bgc_request"] = True
+
+    float_mentions = re.findall(r"float(?:s)?\s*(?:number|#)?\s*(\d{3,})", lower)
+    if float_mentions:
+        filters["float_ids"] = float_mentions
 
     return filters
 
@@ -996,7 +1059,242 @@ def run_query_pipeline(query: str, df: pd.DataFrame, template: str) -> Dict[str,
     }
 
     variable = filters.get("variable")
+    intent = filters.get("intent")
     aggregation = filters.get("aggregation")
+
+    if filters.get("bgc_request") and (not variable or variable not in filtered_df.columns):
+        for candidate in BGC_VARIABLE_KEYS:
+            if candidate in filtered_df.columns:
+                variable = candidate
+                filters["variable"] = candidate
+                break
+
+    def _resolve_variable_meta(var_key: str) -> Tuple[str, str]:
+        for _, meta in VARIABLE_CATALOG.items():
+            if meta[0] == var_key:
+                return meta[1], meta[2]
+        return var_key.upper(), ""
+
+    summary = _summarize_filters(applied_filters)
+
+    if intent == "nearest":
+        target_point = filters.get("target_point")
+        if target_point is None:
+            result["reply"] = (
+                "I can list the closest floats once you provide a location. "
+                "Share a city name or explicit latitude/longitude."
+            )
+            return result
+
+        if row_count == 0 or not {"latitude", "longitude"}.issubset(filtered_df.columns):
+            location_label = filters.get("place_label") or f"{target_point[0]:.2f}°, {target_point[1]:.2f}°"
+            result["reply"] = (
+                f"No floats from the cached dataset are within the requested window near {location_label}.\n"
+                + summary
+            )
+            return result
+
+        latlon = filtered_df.dropna(subset=["latitude", "longitude"]).copy()
+        if latlon.empty:
+            result["reply"] = "Float positions are missing latitude/longitude metadata in this subset."
+            return result
+
+        if "platform_number" in latlon.columns:
+            sort_cols = ["date", "time"]
+            for col in sort_cols:
+                if col in latlon.columns:
+                    latlon = latlon.sort_values(col)
+                    break
+            latlon = latlon.groupby(latlon["platform_number"].astype(str)).tail(1)
+
+        distances = _haversine_km(
+            latlon["latitude"].to_numpy(dtype=float),
+            latlon["longitude"].to_numpy(dtype=float),
+            target_point[0],
+            target_point[1],
+        )
+        latlon = latlon.assign(distance_km=distances)
+        nearest = latlon.nsmallest(5, "distance_km")
+
+        if nearest.empty:
+            result["reply"] = "I couldn't identify any floats to compare at that location."
+            return result
+
+        lines = []
+        location_label = filters.get("place_label") or f"{target_point[0]:.2f}°, {target_point[1]:.2f}°"
+        for _, row in nearest.iterrows():
+            float_label = str(row.get("platform_number", "Unknown"))
+            lat_val = row["latitude"]
+            lon_val = row["longitude"]
+            distance = row["distance_km"]
+            lines.append(
+                f"• Float {float_label} at {lat_val:.2f}°, {lon_val:.2f}° — {distance:.1f} km away"
+            )
+
+        result["reply"] = (
+            f"Nearest floats to {location_label}:\n" + "\n".join(lines) + "\n" + summary
+        )
+        map_fig = build_map_figure(nearest, template)
+        if map_fig is not None:
+            result["map_figure"] = map_fig
+        result["filtered_df"] = nearest
+        return result
+
+    if intent == "hovmoller":
+        candidate_variable = variable or ("temp" if "temp" in filtered_df.columns else None)
+        if not candidate_variable or candidate_variable not in filtered_df.columns:
+            result["reply"] = "The dataset needs a valid variable (e.g., temperature) to build a Hovmöller diagram."
+            return result
+
+        hov_matrix, hov_meta = _prepare_hovmoller_matrix(filtered_df, candidate_variable)
+        if hov_matrix.empty:
+            result["reply"] = (
+                "Not enough depth/time coverage to render a Hovmöller diagram for the current filters.\n"
+                + summary
+            )
+            return result
+
+        variable_title, variable_units = _resolve_variable_meta(candidate_variable)
+        fig = go.Figure(
+            data=go.Heatmap(
+                x=[str(label) for label in hov_matrix.columns],
+                y=hov_matrix.index.astype(float),
+                z=hov_matrix.to_numpy(),
+                colorscale="Viridis",
+                colorbar=dict(title=variable_title),
+            )
+        )
+        fig.update_layout(
+            template=template,
+            title=f"Hovmöller Diagram – {variable_title}",
+            xaxis_title="Profile progression",
+            yaxis_title="Depth (m)",
+            height=420,
+        )
+        fig.update_yaxes(autorange="reversed")
+
+        profiles = hov_meta.get("profiles", 0)
+        result["figure"] = fig
+        result["reply"] = (
+            f"Rendered a Hovmöller diagram for {variable_title.lower()} using {profiles} profiles.\n"
+            + summary
+        )
+        return result
+
+    if intent == "comparison":
+        if "platform_number" not in filtered_df.columns:
+            result["reply"] = (
+                "Float comparison needs `platform_number` metadata. Try another dataset or adjust filters."
+            )
+            return result
+
+        float_ids = filters.get("float_ids", []) or []
+        available = filtered_df["platform_number"].dropna().astype(str)
+        counts = available.value_counts()
+        chosen: List[str] = []
+        for fid in float_ids:
+            if fid in counts.index and fid not in chosen:
+                chosen.append(fid)
+        for fid in counts.index:
+            if len(chosen) >= 2:
+                break
+            if fid not in chosen:
+                chosen.append(fid)
+
+        if len(chosen) < 2:
+            result["reply"] = (
+                "I need at least two floats in view to run a comparison. Try broadening the filters or name two float IDs."
+            )
+            return result
+
+        comparison_variable = variable
+        if not comparison_variable or comparison_variable not in filtered_df.columns:
+            preferred_order = list(BGC_VARIABLE_KEYS) + ["temp", "psal"]
+            for candidate in preferred_order:
+                if candidate in filtered_df.columns:
+                    comparison_variable = candidate
+                    break
+
+        if not comparison_variable:
+            result["reply"] = "No comparable variables (temperature, salinity, or BGC) found in the dataset."
+            return result
+
+        var_title, var_units = _resolve_variable_meta(comparison_variable)
+        subset_a = filtered_df[filtered_df["platform_number"].astype(str) == chosen[0]]
+        subset_b = filtered_df[filtered_df["platform_number"].astype(str) == chosen[1]]
+
+        if subset_a.empty or subset_b.empty:
+            result["reply"] = "The selected floats do not have overlapping data within the current filters."
+            return result
+
+        def _label_with_institution(float_id: str, frame: pd.DataFrame) -> str:
+            inst = ""
+            for col in ("institution", "institution_name", "data_centre", "dac"):
+                if col in frame.columns:
+                    values = frame[col].dropna().astype(str)
+                    if not values.empty:
+                        inst = values.iloc[0]
+                        break
+            return f"{float_id} – {inst}" if inst else str(float_id)
+
+        label_a = _label_with_institution(chosen[0], subset_a)
+        label_b = _label_with_institution(chosen[1], subset_b)
+
+        series_a = _prepare_profile_series(subset_a, comparison_variable)
+        series_b = _prepare_profile_series(subset_b, comparison_variable)
+        common_depths = sorted(set(series_a.index).intersection(series_b.index))
+        comparison = pd.DataFrame(
+            {
+                label_a: series_a.reindex(common_depths),
+                label_b: series_b.reindex(common_depths),
+            },
+            index=common_depths,
+        ).dropna()
+        comparison.index.name = "Depth (m)"
+
+        if comparison.empty:
+            result["reply"] = "Not enough overlapping depth levels to compare those floats."
+            return result
+
+        fig = go.Figure()
+        for column in comparison.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=comparison[column],
+                    y=comparison.index.astype(float),
+                    mode="lines+markers",
+                    name=column,
+                )
+            )
+        fig.update_layout(
+            template=template,
+            title=f"Float Comparison – {var_title}",
+            xaxis_title=f"{var_title} ({var_units})" if var_units else var_title,
+            yaxis_title="Depth (m)",
+            height=420,
+        )
+        fig.update_yaxes(autorange="reversed")
+
+        diff_series = (comparison.iloc[:, 0] - comparison.iloc[:, 1]).abs()
+        avg_diff = diff_series.mean()
+        max_diff = diff_series.max()
+        data_points = len(comparison)
+
+        guidance = (
+            f"Compared {label_a} vs {label_b} across {data_points} shared depth levels. "
+            f"Average difference: {avg_diff:.2f} {var_units or ''}; max difference: {max_diff:.2f} {var_units or ''}."
+        )
+
+        result["figure"] = fig
+        result["reply"] = guidance.strip() + "\n" + summary
+
+        if filters.get("wants_map"):
+            combined_subset = pd.concat([subset_a, subset_b], ignore_index=True)
+            map_fig = build_map_figure(combined_subset, template)
+            if map_fig is not None:
+                result["map_figure"] = map_fig
+
+        return result
 
     if aggregation and row_count > 0:
         if variable and variable in filtered_df.columns:
@@ -1017,7 +1315,6 @@ def run_query_pipeline(query: str, df: pd.DataFrame, template: str) -> Dict[str,
                         "variable": variable,
                         "value": agg_value,
                     }
-                    summary = _summarize_filters(applied_filters)
                     if aggregation == "count":
                         value_text = f"{int(agg_value):,}"
                     else:
@@ -1026,7 +1323,6 @@ def run_query_pipeline(query: str, df: pd.DataFrame, template: str) -> Dict[str,
                     result["reply"] = f"{agg_label} {variable.upper()} = {value_text}.\n{summary}".strip()
         elif aggregation == "count":
             result["aggregation"] = {"type": aggregation, "variable": None, "value": float(row_count)}
-            summary = _summarize_filters(applied_filters)
             result["reply"] = f"Count = {row_count:,}.\n{summary}".strip()
 
     if variable and variable in filtered_df.columns and row_count > 0:
@@ -1034,7 +1330,6 @@ def run_query_pipeline(query: str, df: pd.DataFrame, template: str) -> Dict[str,
         if figure:
             result["figure"] = figure
             result["float_id"] = float_id
-            summary = _summarize_filters(applied_filters)
             base_text = f"Showing {variable.upper()} profile"
             if float_id:
                 base_text += f" for float {float_id}"
@@ -1042,13 +1337,15 @@ def run_query_pipeline(query: str, df: pd.DataFrame, template: str) -> Dict[str,
             result["reply"] = base_text + "\n" + summary
 
     if not result["reply"]:
-        summary = _summarize_filters(applied_filters)
         if row_count > 0:
             result["reply"] = f"Found {row_count:,} matching rows.\n" + summary
         elif applied_filters:
-            result["reply"] = "No rows matched the requested filters.\n" + summary
+            result["reply"] = (
+                "No rows matched the requested filters. Try relaxing the time window or geographic bounds.\n"
+                + summary
+            )
 
-    if filters.get("wants_map") and row_count > 0:
+    if filters.get("wants_map") and row_count > 0 and result.get("map_figure") is None:
         map_fig = build_map_figure(filtered_df, template)
         if map_fig is not None:
             result["map_figure"] = map_fig
