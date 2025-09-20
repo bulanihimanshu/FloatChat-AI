@@ -24,11 +24,25 @@ apply_base_styles()
 
 render_header(current_page=None)
 
-BACKGROUND_PATH = Path("datasets/background.mp4")
+def _resolve_background_path() -> Optional[Path]:
+    """Return the first existing background video path from common locations."""
+
+    current_dir = Path(__file__).resolve().parent
+    candidates = [
+        Path("datasets/background.mp4"),
+        current_dir / "datasets" / "background.mp4",
+        current_dir.parent / "datasets" / "background.mp4",
+    ]
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
 
 
-def _embed_background_video(path: Path) -> Optional[str]:
-    if not path.exists():
+@st.cache_data(show_spinner=False)
+def _embed_background_video(path: Optional[Path]) -> Optional[str]:
+    if path is None or not path.exists():
         return None
 
     data = path.read_bytes()
@@ -39,6 +53,7 @@ def _embed_background_video(path: Path) -> Optional[str]:
     return encoded
 
 
+BACKGROUND_PATH = _resolve_background_path()
 encoded_video = _embed_background_video(BACKGROUND_PATH)
 
 hero_styles = """
