@@ -1,48 +1,69 @@
-import pandas as pd
+"""Convert a local ARGO NetCDF profile to the parquet schema used by the app."""
+
+from __future__ import annotations
+
 from pathlib import Path
 
-CACHE_PATH = Path("data/ArgoFloats-index.parquet")
+import pandas as pd
+import xarray as xr
 
-def fetch_index(use_cache=True):
-    """
-    Load Argo index from local CSV, clean types, 
-    cache as Parquet for faster reloads.
-    """
+from utils import DatasetUnavailableError, ensure_materialised
 
-    url = "./scripts/datasets/ArgoFloats-index_712b_5843_9069.csv"
+RENAME_MAP = {
+    "LATITUDE": "latitude",
+    "LONGITUDE": "longitude",
+    "PRES": "pres",
+    "TEMP": "temp",
+    "PSAL": "psal",
+    "PLATFORM_NUMBER": "platform_number",
+    "JULD": "time",
+}
 
-    if use_cache and CACHE_PATH.exists():
-        print(f"📂 Loading cached data from {CACHE_PATH}")
-        df = pd.read_parquet(CACHE_PATH)
-    else:
-        print("🔄 Loading CSV from:", url)
-        df = pd.read_csv(url, low_memory=False)
 
-        # Ensure lat/lon are floats
-        for col in ["latitude", "longitude"]:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
+def _convert_time_column(df: pd.DataFrame) -> pd.DataFrame:
+    if "time" not in df.columns:
+        return df
 
-        print("💾 Caching to Parquet:", CACHE_PATH)
-        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(CACHE_PATH, index=False)
-
-    print("✅ Loaded", len(df), "records")
-    print("📌 Columns available:", list(df.columns))
-
-    # Optional: filter to bounding box
-    if "latitude" in df.columns and "longitude" in df.columns:
-        df = df[
-            (df["latitude"] >= -30) &
-            (df["latitude"] <= 30) &
-            (df["longitude"] >= 20) &
-            (df["longitude"] <= 120)
-        ]
-        print("📊 Filtered records:", len(df))
-
+    # ARGO stores Julian days since 1950-01-01 00:00:00 UTC.
+    origin = pd.Timestamp("1950-01-01", tz="UTC")
+    df["time"] = origin + pd.to_timedelta(df["time"], unit="D")
+    df["date"] = df["time"].dt.date
     return df
 
 
+def ingest_local_netcdf(
+    source: str | Path,
+    out_path: str | Path = "data_cache/argo_single_profile.parquet",
+) -> Path:
+    """Load ``source`` NetCDF file and persist a flattened parquet file."""
+
+    try:
+        resolved_source = ensure_materialised(source)
+    except DatasetUnavailableError as exc:
+        raise DatasetUnavailableError(
+            "The NetCDF demo file is not available locally. "
+            "Run `git lfs pull` to download it before ingesting."
+        ) from exc
+
+    ds = xr.open_dataset(resolved_source, engine="h5netcdf")
+
+    df = ds.to_dataframe().reset_index()
+    df = df.rename(columns=RENAME_MAP)
+    df = _convert_time_column(df)
+
+    numeric_cols = [c for c in ("latitude", "longitude", "pres", "temp", "psal") if c in df.columns]
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    if numeric_cols:
+        df = df.dropna(subset=numeric_cols, how="all")
+
+    target = Path(out_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(target, index=False)
+    print(f"✅ Saved parquet with {len(df)} rows -> {target}")
+    return target
+
+
 if __name__ == "__main__":
-    data = fetch_index()
-    print(data.head())
+    ingest_local_netcdf("scripts/datasets/1901096_prof.nc")
