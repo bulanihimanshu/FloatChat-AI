@@ -1,25 +1,37 @@
-import pandas as pd
+"""Utility to inspect and cache the bundled ARGO index demo dataset."""
+
+from __future__ import annotations
+
 from pathlib import Path
 
+import pandas as pd
+
+from utils import DatasetUnavailableError, ensure_materialised
+
 CACHE_PATH = Path("data/ArgoFloats-index.parquet")
+SOURCE_CSV = Path("scripts/datasets/ArgoFloats-index_712b_5843_9069.csv")
 
-def fetch_index(use_cache=True):
-    """
-    Load Argo index from local CSV, clean types, 
-    cache as Parquet for faster reloads.
-    """
 
-    url = "./scripts/datasets/ArgoFloats-index_712b_5843_9069.csv"
+def fetch_index(use_cache: bool = True) -> pd.DataFrame:
+    """Load the ARGO index demo file and return a filtered ``DataFrame``."""
 
     if use_cache and CACHE_PATH.exists():
         print(f"📂 Loading cached data from {CACHE_PATH}")
         df = pd.read_parquet(CACHE_PATH)
     else:
-        print("🔄 Loading CSV from:", url)
-        df = pd.read_csv(url, low_memory=False)
+        try:
+            csv_path = ensure_materialised(SOURCE_CSV)
+        except DatasetUnavailableError as exc:
+            raise DatasetUnavailableError(
+                "Local cache refresh requires the demo CSV dataset. "
+                "See README instructions for fetching large assets."
+            ) from exc
 
-        # Ensure lat/lon are floats
-        for col in ["latitude", "longitude"]:
+        print("🔄 Loading CSV from:", csv_path)
+        df = pd.read_csv(csv_path, low_memory=False)
+
+        # Ensure lat/lon are floats when available.
+        for col in ("latitude", "longitude"):
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -31,12 +43,12 @@ def fetch_index(use_cache=True):
     print("📌 Columns available:", list(df.columns))
 
     # Optional: filter to bounding box
-    if "latitude" in df.columns and "longitude" in df.columns:
+    if {"latitude", "longitude"}.issubset(df.columns):
         df = df[
-            (df["latitude"] >= -30) &
-            (df["latitude"] <= 30) &
-            (df["longitude"] >= 20) &
-            (df["longitude"] <= 120)
+            (df["latitude"] >= -30)
+            & (df["latitude"] <= 30)
+            & (df["longitude"] >= 20)
+            & (df["longitude"] <= 120)
         ]
         print("📊 Filtered records:", len(df))
 
