@@ -2,10 +2,18 @@
 from __future__ import annotations
 
 import base64
+import sys
 from pathlib import Path
 from typing import Optional
 
 import streamlit as st
+
+if __package__ in {None, ""}:
+    current_dir = Path(__file__).resolve().parent
+    for parent in (current_dir, *current_dir.parents):
+        if (parent / "app").is_dir():
+            sys.path.insert(0, str(parent))
+            break
 
 from app.app_layout import apply_base_styles
 from app.navigation import NAV_ROUTES, render_header
