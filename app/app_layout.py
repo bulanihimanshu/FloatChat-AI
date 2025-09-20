@@ -925,10 +925,26 @@ def apply_query_filters(df: pd.DataFrame, filters: Dict[str, Any]) -> Tuple[pd.D
         start, end = filters["date_range"]
         start = pd.to_datetime(start, errors="coerce")
         end = pd.to_datetime(end, errors="coerce")
+
         if pd.notna(start) and pd.notna(end):
+            # Ensure both timestamps are comparable regardless of timezone metadata.
+            if getattr(start, "tzinfo", None) is not None:
+                start = start.tz_convert(None)
+            if getattr(end, "tzinfo", None) is not None:
+                end = end.tz_convert(None)
+
             if end < start:
                 start, end = end, start
-            filtered = filtered[(filtered["date"] >= start) & (filtered["date"] <= end)]
+
+            date_series = pd.to_datetime(filtered["date"], errors="coerce")
+            if date_series.dt.tz is not None:
+                try:
+                    date_series = date_series.dt.tz_localize(None)
+                except TypeError:
+                    date_series = date_series.dt.tz_convert(None)
+
+            mask = date_series.between(start, end, inclusive="both")
+            filtered = filtered.loc[mask]
             applied.append(f"date {start.date()} → {end.date()}")
 
     if filters.get("place_label"):
