@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import mimetypes
 import sys
 from pathlib import Path
 from typing import Optional
@@ -122,6 +123,18 @@ def _embed_background_video(path: Optional[Path]) -> Optional[str]:
 
 video_path, image_path = _resolve_background_path()
 encoded_video = _embed_background_video(video_path)
+encoded_image_uri: Optional[str] = None
+
+if image_path is not None and image_path.exists():
+    try:
+        image_bytes = image_path.read_bytes()
+        if image_bytes:
+            mime_type, _ = mimetypes.guess_type(str(image_path))
+            mime_type = mime_type or "image/jpeg"
+            encoded_image = base64.b64encode(image_bytes).decode("utf-8")
+            encoded_image_uri = f"data:{mime_type};base64,{encoded_image}"
+    except Exception as exc:  # pragma: no cover - defensive logging for Streamlit runtime
+        st.error(f"⚠️ Could not load background image: {exc}")
 
 st.markdown(hero_styles, unsafe_allow_html=True)
 
@@ -135,10 +148,10 @@ if encoded_video:
         """,
         unsafe_allow_html=True,
     )
-elif image_path:
+elif encoded_image_uri:
     st.markdown(
         f"""
-        <div class="bg-fallback" style="background-image: url('file://{image_path}');"></div>
+        <div class="bg-fallback" style="background-image: url('{encoded_image_uri}');"></div>
         <div class="video-overlay"></div>
         """,
         unsafe_allow_html=True,
