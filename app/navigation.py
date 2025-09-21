@@ -34,12 +34,12 @@ MAP_ROUTES = {
 }
 
 NAV_ROUTES = {
-    "Profile": "pages/20_Profile",
-    "Hovmöller": "pages/30_Hovmöller",
-    "Float Comparison": "pages/40_Float_Comparison",
-    "Table": "pages/50_Table",
-    "Export": "pages/60_Export",
-    "Chat": "pages/70_Chat",
+    "Profile": "pages/20_Profile.py",
+    "Hovmöller": "pages/30_Hovmöller.py",
+    "Float Comparison": "pages/40_Float_Comparison.py",
+    "Table": "pages/50_Table.py",
+    "Export": "pages/60_Export.py",
+    "Chat": "pages/70_Chat.py",
 }
 
 
