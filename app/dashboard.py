@@ -138,27 +138,6 @@ if image_path is not None and image_path.exists():
 
 st.markdown(hero_styles, unsafe_allow_html=True)
 
-if encoded_video:
-    st.markdown(
-        f"""
-        <video class="bg-video" autoplay loop muted playsinline>
-            <source src="data:video/mp4;base64,{encoded_video}" type="video/mp4">
-        </video>
-        <div class="video-overlay"></div>
-        """,
-        unsafe_allow_html=True,
-    )
-elif encoded_image_uri:
-    st.markdown(
-        f"""
-        <div class="bg-fallback" style="background-image: url('{encoded_image_uri}');"></div>
-        <div class="video-overlay"></div>
-        """,
-        unsafe_allow_html=True,
-    )
-else:
-    st.warning("🎥 No background video or image found. Using plain overlay.")
-
 # ---------------- Hero section ---------------- #
 st.markdown(
     """
