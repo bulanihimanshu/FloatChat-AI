@@ -1,6 +1,6 @@
 # 🌊 FloatChat — Conversational Explorer for ARGO Floats
 
-FloatChat is a Streamlit application that turns the ARGO float archive into an interactive, judge-ready demo. It combines rich visual exploration, lightweight analytics, and a natural-language assistant tailored for the Indian Ocean focus area.
+FloatChat is a Streamlit application that turns the ARGO float archive into an interactive. It combines rich visual exploration, lightweight analytics, and a natural-language assistant tailored for the Indian Ocean focus area.
 
 ## 🚀 Feature Snapshot
 
