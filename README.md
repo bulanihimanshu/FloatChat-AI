@@ -105,6 +105,29 @@ Chart Builders   Nearest/LLM Fallbacks
 - **Advanced analytics** – Multi-variable anomalies, climatology comparisons, and richer trend analysis are earmarked for post-demo iterations.
 - **Geocoding resilience** – Live OpenStreetMap geocoding is used when no cache is available. Bundling an offline gazetteer is on the backlog.
 
+---
+
+## 👨‍💻 My Contributions
+
+**Role:** Frontend Developer & Backend Contributor  
+**Event:** Smart India Hackathon (SIH)  
+**Team Size:** 6 Members
+
+As part of a six-member team, I primarily focused on developing and improving the frontend of **FloatChat-AI**, while also contributing to backend functionality and AI integration.
+
+- **Frontend Development:** Developed and refined the application's user interface, focusing on usability, navigation, and effective presentation of oceanographic data.
+
+- **Data Visualization:** Contributed to the frontend integration and presentation of interactive data visualizations, making complex oceanographic information easier to explore and understand.
+
+- **Agent-Based Architecture:** Assisted in developing and integrating components of the agent-based system responsible for data retrieval and visualization.
+
+- **RAG System:** Contributed to parts of the Retrieval-Augmented Generation (RAG) implementation, supporting the application's conversational data exploration capabilities.
+
+- **Team Collaboration:** Collaborated with five other team members to integrate frontend, backend, and AI components into a functional oceanographic analytics platform.
+
+> **Note:** FloatChat-AI was developed collaboratively as part of Smart India Hackathon. This repository is a fork of the original team project, maintained to showcase my individual contributions while preserving credit for the entire team.
+
+
 ## 🤝 Contributing
 
 Contributions are welcome! Please format your code, update documentation for new datasets or dependencies, and share reproducible steps when filing issues.
